@@ -27,6 +27,7 @@ import {
   TeamOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
+import type { TableRowSelection } from "antd/es/table/interface";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
@@ -228,7 +229,9 @@ export default function HomePage() {
   const [accountManagementVisible, setAccountManagementVisible] = useState(false);
   const [versionHistory, setVersionHistory] = useState<Record<number, QuestionVersionSummary[]>>({});
   const [loadingVersionHistory, setLoadingVersionHistory] = useState<Set<number>>(new Set());
-  const [modelRequest, setModelRequest] = useState<{ kind: "single"; id: number; checkTypes?: string[] } | { kind: "batch" } | null>(null);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState<number[]>([]);
+  const [selectedQuestions, setSelectedQuestions] = useState<Record<number, Question>>({});
+  const [modelRequest, setModelRequest] = useState<{ kind: "single"; id: number; checkTypes?: string[] } | { kind: "batch"; ids: number[] } | null>(null);
   const [startingModelCheck, setStartingModelCheck] = useState(false);
 
   const { data: currentUser, error: authError } = useSWR<CurrentUser>("/api/auth/me", fetcher);
@@ -437,53 +440,64 @@ export default function HomePage() {
     }
   };
 
-  const startBatchCheck = async (model: AuditModelId) => {
-    const pendingIds = (data?.items || [])
-      .filter((q) => q.status === "pending" && !checkingIds.has(q.id))
-      .map((q) => q.id);
+  const startBatchCheck = async (ids: number[], model: AuditModelId) => {
+    const targetIds = ids.filter((id) => !checkingIds.has(id));
 
-    if (pendingIds.length === 0) {
-      message.info("没有待检测的题目");
+    if (targetIds.length === 0) {
+      message.info("所选题目均在检测中，请稍后再试");
       return;
     }
 
-    message.info(`已提交 ${pendingIds.length} 道题目的后台质检任务`);
-    setBatchTotal(pendingIds.length);
+    message.info(`已提交 ${targetIds.length} 道题目的后台质检任务`);
+    setBatchTotal(targetIds.length);
     setBatchDone(0);
-    setCheckingIds(new Set(pendingIds));
+    setCheckingIds((previous) => new Set([...previous, ...targetIds]));
     try {
-      const batch = await startBatch(pendingIds, ["latex", "difficulty", "answer", "synthesis"], model);
+      const batch = await startBatch(targetIds, ["latex", "difficulty", "answer", "synthesis"], model);
       setActiveBatchId(batch.batchId);
-      batch.runIds.forEach((runId, index) => watchRun(runId, pendingIds[index]));
+      batch.runIds.forEach((runId, index) => watchRun(runId, targetIds[index]));
+      setSelectedQuestionIds([]);
+      setSelectedQuestions({});
     } catch (error) {
-      setCheckingIds(new Set());
+      setCheckingIds((previous) => {
+        const next = new Set(previous);
+        targetIds.forEach((id) => next.delete(id));
+        return next;
+      });
       message.error("批量质检启动失败: " + (error instanceof Error ? error.message : "Unknown error"));
     }
   };
 
-  const openBatchModelSelection = () => setModelRequest({ kind: "batch" });
+  const openBatchModelSelection = (ids: number[]) => setModelRequest({ kind: "batch", ids });
 
   const handleBatchCheck = () => {
-    const pendingQuestions = (data?.items || [])
-      .filter((question) => question.status === "pending" && !checkingIds.has(question.id));
+    const targetIds = selectedQuestionIds.filter((id) => !checkingIds.has(id));
 
-    if (pendingQuestions.length === 0) {
-      message.info("没有待检测的题目");
-      return;
-    }
-
-    const existingResultCount = pendingQuestions.filter((question) => question.checkResults?.length).length;
-    if (existingResultCount === 0) {
-      openBatchModelSelection();
+    if (targetIds.length === 0) {
+      message.info("请先在列表中选择需要质检的题目");
       return;
     }
 
     Modal.confirm({
-      title: "已有结果",
-      content: `本次待检测题目中有 ${existingResultCount} 道已有质检结果，是否重新检测？`,
-      okText: "重新检测",
+      title: "确认全量质检",
+      content: `已选择 ${targetIds.length} 条题目，是否确认开始质检？`,
+      okText: "确认质检",
       cancelText: "取消",
-      onOk: openBatchModelSelection,
+      onOk: () => {
+        const existingResultCount = targetIds.filter((id) => selectedQuestions[id]?.checkResults?.length).length;
+        if (existingResultCount === 0) {
+          openBatchModelSelection(targetIds);
+          return;
+        }
+
+        Modal.confirm({
+          title: "已有结果",
+          content: `已选择的题目中有 ${existingResultCount} 条已有质检结果，是否重新检测？`,
+          okText: "重新检测",
+          cancelText: "取消",
+          onOk: () => openBatchModelSelection(targetIds),
+        });
+      },
     });
   };
 
@@ -492,7 +506,7 @@ export default function HomePage() {
     setStartingModelCheck(true);
     try {
       if (modelRequest.kind === "single") await startSingleCheck(modelRequest.id, modelRequest.checkTypes, model);
-      else await startBatchCheck(model);
+      else await startBatchCheck(modelRequest.ids, model);
       setModelRequest(null);
     } finally {
       setStartingModelCheck(false);
@@ -681,6 +695,21 @@ export default function HomePage() {
     },
   ];
 
+  const rowSelection: TableRowSelection<Question> = {
+    selectedRowKeys: selectedQuestionIds,
+    preserveSelectedRowKeys: true,
+    onChange: (keys, rows) => {
+      setSelectedQuestionIds(keys.map(Number));
+      setSelectedQuestions((previous) => {
+        const next = { ...previous };
+        (data?.items || []).forEach((question) => delete next[question.id]);
+        rows.forEach((question) => { next[question.id] = question; });
+        return next;
+      });
+    },
+    getCheckboxProps: (question) => ({ disabled: question.status === "checking" || checkingIds.has(question.id) }),
+  };
+
   const checkingCount = checkingIds.size;
 
   if (!currentUser) {
@@ -780,7 +809,7 @@ export default function HomePage() {
               loading={checkingCount > 0}
               onClick={handleBatchCheck}
             >
-              {checkingCount > 0 ? `质检中 (${checkingCount})` : "批量质检"}
+              {checkingCount > 0 ? `质检中 (${checkingCount})` : `全部质检（已选 ${selectedQuestionIds.length} 条）`}
             </Button>
             <Button icon={<ExportOutlined />} loading={exporting} onClick={handleExport}>导出</Button>
           </Space>
@@ -863,6 +892,7 @@ export default function HomePage() {
             columns={columns}
             dataSource={data?.items}
             rowKey="id"
+            rowSelection={rowSelection}
             loading={isLoading}
             scroll={{ x: 1800 }}
             expandable={{
