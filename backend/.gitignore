@@ -1,7 +1,0 @@
-.DS_Store
-.env
-.env.*
-!.env.example
-app/.pytest_cache/
-app/**/__pycache__/
-app/**/*.py[cod]

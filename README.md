@@ -32,6 +32,14 @@ flowchart LR
 
 ## 目录
 
+本仓库是聚合仓库：三个服务保留各自的 GitLab 仓库与提交历史，并通过 Git 子模块锁定协作版本。首次获取代码请使用：
+
+```bash
+git clone --recurse-submodules https://github.com/peteryipikachu-cpu/stem-system.git
+```
+
+已有克隆可执行 `git submodule update --init --recursive`；需要更新到各子模块远端 `main` 时，先在对应子模块完成提交与推送，再更新本仓库中的子模块指针。
+
 | 目录 | 说明 |
 | --- | --- |
 | [`frontend/`](frontend/README.md) | Next.js 16 + React 19 前端，题目管理、导入、审核进度与结果展示。 |
