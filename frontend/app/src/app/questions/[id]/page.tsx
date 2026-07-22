@@ -514,8 +514,25 @@ export default function QuestionDetailPage() {
     }
   };
 
+  const openModelSelection = (checkTypes: string[]) => {
+    setPendingCheckTypes(checkTypes);
+  };
+
   const handleCheck = (checkTypes: string[]) => {
-    if (!isHistorical) setPendingCheckTypes(checkTypes);
+    if (isHistorical) return;
+
+    if (!question?.checkResults?.length) {
+      openModelSelection(checkTypes);
+      return;
+    }
+
+    Modal.confirm({
+      title: "已有结果",
+      content: "当前题目已有质检结果，是否重新检测？",
+      okText: "重新检测",
+      cancelText: "取消",
+      onOk: () => openModelSelection(checkTypes),
+    });
   };
 
   const confirmModel = async (model: AuditModelId) => {
