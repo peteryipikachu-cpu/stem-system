@@ -15,6 +15,7 @@ from sqlalchemy import case, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import Settings
+from .audit_models import AuditModel, get_audit_model, model_from_snapshot
 from .models import CheckBatch, CheckEvent, CheckResult, CheckRun, CheckWorkItem, Question, QuestionVersion
 from .queue import acquire, pop_ready as pop_ready_queue, release
 from .schemas import DEFAULT_CHECK_TYPES, VALID_CHECK_TYPES
@@ -178,28 +179,38 @@ async def move_batch_cutoff_to_manual_review(session: AsyncSession, redis: Redis
     return len(affected_runs)
 
 
+class ActiveModelConflictError(ValueError):
+    pass
+
+
+def run_audit_model(run: CheckRun) -> AuditModel:
+    return model_from_snapshot(run.model_versions)
+
+
 def make_work(run: CheckRun, check_type: str, stage: str, attempt: int, provider: str,
               status: str = "queued", queue_owner_id: int = 0) -> CheckWorkItem:
     # 同一 CheckRun 内保持幂等；人工重检必须能创建新的工作项，不能与历史失败记录冲突。
     key = f"r:{run.id}|q:{run.question_id}|c:{check_type}|s:{stage}|a:{attempt}|v:{run.prompt_version}"
     return CheckWorkItem(run_id=run.id, question_id=run.question_id, check_type=check_type, stage=stage,
                          attempt=attempt, provider=provider, priority=run.priority, queue_owner_id=queue_owner_id, status=status,
-                         idempotency_key=key, payload={})
+                         idempotency_key=key,
+                         payload={} if provider == "rule" else {"model": run_audit_model(run).snapshot()})
 
 
 def make_check_work_items(run: CheckRun, check_types: list[str], queue_owner_id: int) -> list[CheckWorkItem]:
     works: list[CheckWorkItem] = []
+    model = run_audit_model(run)
     for check_type in check_types:
         if check_type == "latex":
             works.append(make_work(run, check_type, "check", 0, "rule", queue_owner_id=queue_owner_id))
         elif check_type == "difficulty":
-            works.extend(make_work(run, check_type, "solve", i, "doubao", "blocked", queue_owner_id) for i in range(1, 9))
-            works.append(make_work(run, check_type, "equivalence", 0, "doubao", "blocked", queue_owner_id))
+            works.extend(make_work(run, check_type, "solve", i, model.provider, "blocked", queue_owner_id) for i in range(1, model.pass_k + 1))
+            works.append(make_work(run, check_type, "equivalence", 0, model.provider, "blocked", queue_owner_id))
         elif check_type == "answer":
-            works.extend(make_work(run, check_type, "solve", i, "gemini", "blocked", queue_owner_id) for i in range(1, 5))
-            works.append(make_work(run, check_type, "equivalence", 0, "doubao", "blocked", queue_owner_id))
+            works.extend(make_work(run, check_type, "solve", i, model.provider, "blocked", queue_owner_id) for i in range(1, model.pass_k + 1))
+            works.append(make_work(run, check_type, "equivalence", 0, model.provider, "blocked", queue_owner_id))
         elif check_type == "synthesis":
-            works.append(make_work(run, check_type, "synthesis", 0, "doubao", "blocked", queue_owner_id))
+            works.append(make_work(run, check_type, "synthesis", 0, model.provider, "blocked", queue_owner_id))
         else:
             raise ValueError(f"unsupported check type: {check_type}")
     return works
@@ -226,13 +237,17 @@ async def add_check_work_items(session: AsyncSession, redis: Redis, run: CheckRu
 
 
 async def create_run(session: AsyncSession, redis: Redis, question_id: int, check_types: list[str],
-                     idempotency_key: str, priority: str = "interactive", batch_id: Optional[uuid.UUID] = None) -> CheckRun:
+                     idempotency_key: str, priority: str = "interactive", batch_id: Optional[uuid.UUID] = None,
+                     model_id: Optional[str] = None) -> CheckRun:
     types = list(dict.fromkeys(check_types or DEFAULT_CHECK_TYPES))
+    model = get_audit_model(model_id)
     invalid = set(types) - VALID_CHECK_TYPES
     if invalid:
         raise ValueError(f"unsupported check types: {', '.join(sorted(invalid))}")
     existing = await session.scalar(select(CheckRun).where(CheckRun.idempotency_key == idempotency_key))
     if existing:
+        if run_audit_model(existing).id != model.id:
+            raise ActiveModelConflictError("同一幂等请求已使用其他模型创建，不能切换模型")
         return existing
     question = await session.get(Question, question_id, with_for_update=True)
     if not question:
@@ -240,6 +255,8 @@ async def create_run(session: AsyncSession, redis: Redis, question_id: int, chec
     active = await session.scalar(select(CheckRun).where(CheckRun.question_id == question_id,
         CheckRun.status.in_(["queued", "running", "cancelling"])).limit(1))
     if active:
+        if run_audit_model(active).id != model.id:
+            raise ActiveModelConflictError("该题已有使用其他模型的进行中质检，请等待完成或取消后再切换模型")
         current_types = list(active.check_types or [])
         added_types = [check_type for check_type in types if check_type not in current_types]
         if added_types:
@@ -249,16 +266,17 @@ async def create_run(session: AsyncSession, redis: Redis, question_id: int, chec
                 "questionId": question_id,
                 "checkTypes": added_types,
                 "checkRunId": str(active.id),
-                "added": True,
+                "model": model.snapshot(), "added": True,
             })
         return active
     run = CheckRun(question_id=question_id, batch_id=batch_id, check_types=types, priority=priority,
-                   status="queued", idempotency_key=idempotency_key)
+                   status="queued", idempotency_key=idempotency_key, model_versions=model.snapshot())
     question.status = "checking"
     session.add(run)
     await session.flush()
     await add_check_work_items(session, redis, run, types, question.owner_id or 0)
-    await emit(session, redis, run.id, "start", {"questionId": question_id, "checkTypes": types, "checkRunId": str(run.id)})
+    await emit(session, redis, run.id, "start", {"questionId": question_id, "checkTypes": types,
+               "checkRunId": str(run.id), "model": model.snapshot()})
     return run
 
 

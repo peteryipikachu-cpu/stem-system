@@ -32,6 +32,7 @@ import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import AccountManagementModal from "@/components/AccountManagementModal";
 import ImportModal from "@/components/ImportModal";
+import ModelSelectionModal from "@/components/ModelSelectionModal";
 import LatexRenderer from "@/components/LatexRenderer";
 import { CHECK_TYPE_LABELS, CheckType } from "@/types";
 import {
@@ -42,6 +43,7 @@ import {
   type CheckBatchStatus,
   type CheckRunEvent,
 } from "@/lib/check-runs";
+import type { AuditModelId } from "@/lib/audit-models";
 
 const { Header, Content } = Layout;
 const { Title, Text } = Typography;
@@ -164,7 +166,7 @@ function getJudgmentBasis(checkResults: CheckResult[]): string {
         } else if (r.checkType === "latex" && detail.errors?.length > 0) {
           parts.push(`${label}: ${detail.errors[0].description}`);
         } else if (r.checkType === "difficulty") {
-          parts.push(`${label}: 答对${detail.correctCount}/${detail.totalCount}次（阈値≤6次）`);
+          parts.push(`${label}: ${String((detail.model as { label?: string } | undefined)?.label || "模型")} 答对${detail.correctCount}/${detail.totalCount}次（阈值≤${detail.threshold ?? "-"}次）`);
         } else if (detail.error) {
           parts.push(`${label}: ${detail.error}`);
         }
@@ -226,6 +228,8 @@ export default function HomePage() {
   const [accountManagementVisible, setAccountManagementVisible] = useState(false);
   const [versionHistory, setVersionHistory] = useState<Record<number, QuestionVersionSummary[]>>({});
   const [loadingVersionHistory, setLoadingVersionHistory] = useState<Set<number>>(new Set());
+  const [modelRequest, setModelRequest] = useState<{ kind: "single"; id: number; checkTypes?: string[] } | { kind: "batch" } | null>(null);
+  const [startingModelCheck, setStartingModelCheck] = useState(false);
 
   const { data: currentUser, error: authError } = useSWR<CurrentUser>("/api/auth/me", fetcher);
   useEffect(() => {
@@ -311,12 +315,12 @@ export default function HomePage() {
     });
   };
 
-  const handleCheck = async (id: number, checkTypes?: string[]) => {
+  const startSingleCheck = async (id: number, checkTypes: string[] | undefined, model: AuditModelId) => {
     setCheckingIds((prev) => new Set([...prev, id]));
     setCheckProgress((prev) => ({ ...prev, [id]: "启动质检..." }));
 
     try {
-      const accepted = await startCheck(id, checkTypes || ["latex", "difficulty", "answer", "synthesis"]);
+      const accepted = await startCheck(id, checkTypes || ["latex", "difficulty", "answer", "synthesis"], model);
       watchRun(accepted.checkRunId, id);
     } catch (err) {
       message.error("质检启动失败: " + (err instanceof Error ? err.message : "Unknown error"));
@@ -327,6 +331,8 @@ export default function HomePage() {
       });
     }
   };
+
+  const handleCheck = (id: number, checkTypes?: string[]) => setModelRequest({ kind: "single", id, checkTypes });
 
   const handleExport = async () => {
     setExporting(true);
@@ -360,10 +366,10 @@ export default function HomePage() {
             return d.errors.map((e: { description: string }) => e.description).join(";");
           }
           if (type === "difficulty") {
-            return `答对${d.correctCount ?? "-"}/${d.totalCount ?? 8}次（阈値≤6次）`;
+            return `${d.model?.label || "模型"} 答对${d.correctCount ?? "-"}/${d.totalCount ?? "-"}次（阈值≤${d.threshold ?? "-"}次）`;
           }
           if (type === "answer") {
-            return `答对${d.correctCount ?? "-"}/${d.totalCount ?? 4}次`;
+            return `${d.model?.label || "模型"} 答对${d.correctCount ?? "-"}/${d.totalCount ?? "-"}次`;
           }
           if (type === "synthesis") {
             if (!d.reasons?.length) return d.isSynthetic ? "疑似合成" : "未发现问题";
@@ -414,7 +420,7 @@ export default function HomePage() {
     }
   };
 
-  const handleBatchCheck = async () => {
+  const startBatchCheck = async (model: AuditModelId) => {
     const pendingIds = (data?.items || [])
       .filter((q) => q.status === "pending" && !checkingIds.has(q.id))
       .map((q) => q.id);
@@ -429,12 +435,26 @@ export default function HomePage() {
     setBatchDone(0);
     setCheckingIds(new Set(pendingIds));
     try {
-      const batch = await startBatch(pendingIds, ["latex", "difficulty", "answer", "synthesis"]);
+      const batch = await startBatch(pendingIds, ["latex", "difficulty", "answer", "synthesis"], model);
       setActiveBatchId(batch.batchId);
       batch.runIds.forEach((runId, index) => watchRun(runId, pendingIds[index]));
     } catch (error) {
       setCheckingIds(new Set());
       message.error("批量质检启动失败: " + (error instanceof Error ? error.message : "Unknown error"));
+    }
+  };
+
+  const handleBatchCheck = () => setModelRequest({ kind: "batch" });
+
+  const confirmModel = async (model: AuditModelId) => {
+    if (!modelRequest) return;
+    setStartingModelCheck(true);
+    try {
+      if (modelRequest.kind === "single") await startSingleCheck(modelRequest.id, modelRequest.checkTypes, model);
+      else await startBatchCheck(model);
+      setModelRequest(null);
+    } finally {
+      setStartingModelCheck(false);
     }
   };
 
@@ -724,6 +744,8 @@ export default function HomePage() {
             <Button icon={<ExportOutlined />} loading={exporting} onClick={handleExport}>导出</Button>
           </Space>
         </div>
+
+        <ModelSelectionModal open={Boolean(modelRequest)} loading={startingModelCheck} onCancel={() => setModelRequest(null)} onConfirm={confirmModel} />
 
         {/* 进度提示 */}
         {(checkingCount > 0 || activeBatch) && (

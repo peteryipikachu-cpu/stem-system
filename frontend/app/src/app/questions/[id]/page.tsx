@@ -36,8 +36,10 @@ import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import useSWR from "swr";
 import LatexRenderer from "@/components/LatexRenderer";
+import ModelSelectionModal from "@/components/ModelSelectionModal";
 import { CHECK_TYPE_LABELS, CheckType } from "@/types";
 import { getCheckRun, startCheck, subscribeCheckRun, type CheckRunEvent } from "@/lib/check-runs";
+import { auditModelLabel, type AuditModelId } from "@/lib/audit-models";
 
 const { Header, Content } = Layout;
 const { Title, Text } = Typography;
@@ -97,6 +99,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
   }
 
   const label = CHECK_TYPE_LABELS[cr.checkType as CheckType] || cr.checkType;
+  const modelLabel = auditModelLabel(detail.model as { label?: unknown; id?: unknown });
 
   const renderDetail = () => {
     if (cr.result === "manual_review") {
@@ -131,7 +134,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
       const equivalences = (detail.equivalences || []) as boolean[];
       return (
         <Space orientation="vertical" style={{ width: "100%" }}>
-          <Text>豆包模型答对次数：<Text strong style={{ color: correct <= threshold ? "#52c41a" : "#ff4d4f" }}>{correct}/{total}</Text>（阈値 ≤{threshold}次）</Text>
+          <Text>{modelLabel} 答对次数：<Text strong style={{ color: correct <= threshold ? "#52c41a" : "#ff4d4f" }}>{correct}/{total}</Text>（阈值 ≤{threshold}次）</Text>
           <Text type="secondary">答对 ≤{threshold} 次说明难度足够，答对 &gt;{threshold} 次说明难度不足</Text>
           {responses.length > 0 && (
             <div style={{ marginTop: 4 }}>
@@ -159,7 +162,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
               </div>
             </div>
           )}
-          {cr.result === "fail" && <Alert type="warning" title={`豆包答对 ${correct} 次，超过阈値，难度可能不足`} />}
+          {cr.result === "fail" && <Alert type="warning" title={`${modelLabel} 答对 ${correct} 次，超过阈值，难度可能不足`} />}
         </Space>
       );
     }
@@ -171,7 +174,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
       const equivalences = (detail.equivalences || []) as boolean[];
       return (
         <Space orientation="vertical" style={{ width: "100%" }}>
-          <Text>Gemini 答对次数：<Text strong style={{ color: correct >= 1 ? "#52c41a" : "#ff4d4f" }}>{correct}/{total}</Text></Text>
+          <Text>{modelLabel} 答对次数：<Text strong style={{ color: correct >= 1 ? "#52c41a" : "#ff4d4f" }}>{correct}/{total}</Text></Text>
           <Text type="secondary">≥1 次答对说明答案可信</Text>
           {responses.length > 0 && (
             <div style={{ marginTop: 4 }}>
@@ -198,7 +201,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
               </div>
             </div>
           )}
-          {cr.result === "fail" && <Alert type="error" title="Gemini 4次均未答对，答案可能有误" />}
+          {cr.result === "fail" && <Alert type="error" title={`${modelLabel} ${total} 次均未答对，答案可能有误`} />}
         </Space>
       );
     }
@@ -330,6 +333,8 @@ export default function QuestionDetailPage() {
   const [checkDurations] = useState<Record<string, number>>({}); // 耗时 ms
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pendingCheckTypes, setPendingCheckTypes] = useState<string[] | null>(null);
+  const [startingCheck, setStartingCheck] = useState(false);
   const [form] = Form.useForm<EditQuestionValues>();
 
   const handleCopy = async (text: string, label: string) => {
@@ -484,7 +489,7 @@ export default function QuestionDetailPage() {
     if (authError) router.replace("/login");
   }, [authError, router]);
 
-  const handleCheck = async (checkTypes: string[]) => {
+  const startCheckWithModel = async (checkTypes: string[], model: AuditModelId) => {
     if (isHistorical) return;
     setCheckingTypes((previous) => new Set([...previous, ...checkTypes]));
     setCheckProgress((previous) => {
@@ -494,7 +499,7 @@ export default function QuestionDetailPage() {
     });
 
     try {
-      await startCheck(Number(id), checkTypes);
+      await startCheck(Number(id), checkTypes, model);
       await mutate();
     } catch (err) {
       const label = checkTypes.length === 1
@@ -509,6 +514,21 @@ export default function QuestionDetailPage() {
     }
   };
 
+  const handleCheck = (checkTypes: string[]) => {
+    if (!isHistorical) setPendingCheckTypes(checkTypes);
+  };
+
+  const confirmModel = async (model: AuditModelId) => {
+    if (!pendingCheckTypes) return;
+    setStartingCheck(true);
+    try {
+      await startCheckWithModel(pendingCheckTypes, model);
+      setPendingCheckTypes(null);
+    } finally {
+      setStartingCheck(false);
+    }
+  };
+
   const handleSaveVersion = async () => {
     if (!question || isHistorical) return;
     try {
@@ -517,7 +537,8 @@ export default function QuestionDetailPage() {
       const response = await fetch(`/api/questions/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...values, currentVersion: question.currentVersion }),
+        // 标题和专家 ID 不是题目编辑项；显式保留，避免后端的完整更新契约将它们置空。
+        body: JSON.stringify({ ...values, title: question.title, expertId: question.expertId, currentVersion: question.currentVersion }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "保存失败");
@@ -787,6 +808,8 @@ export default function QuestionDetailPage() {
           </Col>
         </Row>
 
+        <ModelSelectionModal open={Boolean(pendingCheckTypes)} loading={startingCheck} onCancel={() => setPendingCheckTypes(null)} onConfirm={confirmModel} />
+
         <Modal
           title={`编辑题目 · 将保存为 v${(question.currentVersion || 1) + 1}`}
           open={editing && !isHistorical}
@@ -800,12 +823,10 @@ export default function QuestionDetailPage() {
         >
           <Form form={form} layout="vertical">
             <Row gutter={16}>
-              <Col span={12}><Form.Item name="title" label="标题"><Input /></Form.Item></Col>
               <Col span={12}><Form.Item name="type" label="题目类型"><Input /></Form.Item></Col>
               <Col span={12}><Form.Item name="domain" label="领域"><Input /></Form.Item></Col>
               <Col span={12}><Form.Item name="difficulty" label="难度"><Input /></Form.Item></Col>
               <Col span={12}><Form.Item name="knowledgePoints" label="知识点"><Input /></Form.Item></Col>
-              <Col span={12}><Form.Item name="expertId" label="专家 ID"><Input /></Form.Item></Col>
               <Col span={12}><Form.Item name="subject" label="学科"><Input /></Form.Item></Col>
             </Row>
             <Form.Item name="question" label="题目" rules={[{ required: true, whitespace: true, message: "题目不能为空" }]}>

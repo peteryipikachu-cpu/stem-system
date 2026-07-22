@@ -18,11 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from .config import get_settings
+from .audit_models import ensure_audit_model_available, get_audit_model
 from .auth import SESSION_COOKIE, create_session_token, ensure_initial_admin, get_current_user, hash_password, require_admin, user_view, verify_password
 from .db import SessionLocal, engine, get_session
 from .models import Base, CheckBatch, CheckEvent, CheckRun, CheckWorkItem, Question, QuestionVersion, User
+from .queue import provider_limit
 from .schemas import AcceptedBatch, AcceptedRun, BatchCheckRequest, CheckRequest, LoginRequest, PasswordReset, QuestionCreate, QuestionUpdate, UserCreate
-from .services import create_run, question_json, question_snapshot_json, question_version_json
+from .services import ActiveModelConflictError, create_run, question_json, question_snapshot_json, question_version_json
 
 settings = get_settings()
 redis = Redis.from_url(settings.redis_url, decode_responses=True)
@@ -57,6 +59,24 @@ def default_batch_deadline() -> datetime:
         hour=settings.batch_deadline_hour, minute=0, second=0, microsecond=0,
     )
     return deadline.astimezone(timezone.utc)
+
+
+def estimate_batch_seconds(question_count: int, check_types: list[str], model_id: Optional[str]) -> float:
+    model = get_audit_model(model_id)
+    counts: dict[str, int] = {}
+    for check_type in check_types:
+        if check_type in {"difficulty", "answer"}:
+            counts["solve"] = counts.get("solve", 0) + model.pass_k
+            counts["equivalence"] = counts.get("equivalence", 0) + 1
+        elif check_type == "synthesis":
+            counts["synthesis"] = counts.get("synthesis", 0) + 1
+    lanes: dict[str, tuple[int, int]] = {}
+    for stage, count in counts.items():
+        limit = provider_limit(settings, model.provider, stage)
+        prior, _ = lanes.get(limit.lane, (0, limit.lane_concurrency))
+        lanes[limit.lane] = (prior + count, limit.lane_concurrency)
+    return max((question_count * count / max(1, concurrency) * settings.batch_estimated_model_p95_seconds
+                for count, concurrency in lanes.values()), default=0.0)
 
 
 async def batch_view(session: AsyncSession, batch: CheckBatch) -> dict[str, Any]:
@@ -345,10 +365,15 @@ async def start_check(question_id: int, payload: CheckRequest, current_user: Use
     await get_visible_question(session, question_id, current_user)
     key = idempotency_key or f"interactive:{question_id}:{uuid.uuid4()}"
     try:
-        run = await create_run(session, redis, question_id, payload.checkTypes, key)
+        model = get_audit_model(payload.model)
+        if any(check_type != "latex" for check_type in payload.checkTypes):
+            model = ensure_audit_model_available(settings, model.id)
+        run = await create_run(session, redis, question_id, payload.checkTypes, key, model_id=model.id)
         await session.commit()
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
+    except ActiveModelConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"checkRunId": run.id, "status": run.status}
@@ -358,15 +383,22 @@ async def start_check(question_id: int, payload: CheckRequest, current_user: Use
 async def start_batch(payload: BatchCheckRequest, current_user: User = Depends(get_current_user), idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     for question_id in payload.questionIds:
         await get_visible_question(session, question_id, current_user)
+    try:
+        model = get_audit_model(payload.model)
+        if any(check_type != "latex" for check_type in payload.checkTypes):
+            model = ensure_audit_model_available(settings, model.id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    active_runs = (await session.scalars(select(CheckRun).where(
+        CheckRun.question_id.in_(payload.questionIds),
+        CheckRun.status.in_(["queued", "running", "cancelling"]),
+    ))).all()
+    if any(get_audit_model((run.model_versions or {}).get("id")).id != model.id for run in active_runs):
+        raise HTTPException(409, "存在使用其他模型的进行中质检，请等待完成或取消后再切换模型")
     deadline = payload.deadlineAt or default_batch_deadline()
     if deadline.tzinfo is None:
         deadline = deadline.replace(tzinfo=timezone.utc)
-    p95 = settings.batch_estimated_model_p95_seconds
-    estimated_seconds = max(
-        len(payload.questionIds) * 9 / settings.ai_limit_doubao_deep_concurrency * p95,
-        len(payload.questionIds) * 2 / settings.ai_limit_doubao_fast_concurrency * p95,
-        len(payload.questionIds) * 4 / settings.ai_limit_gemini_answer_concurrency * p95,
-    )
+    estimated_seconds = estimate_batch_seconds(len(payload.questionIds), payload.checkTypes, model.id)
     batch = CheckBatch(
         check_types=payload.checkTypes,
         total_count=len(payload.questionIds),
@@ -379,7 +411,8 @@ async def start_batch(payload: BatchCheckRequest, current_user: User = Depends(g
     runs = []
     for question_id in payload.questionIds:
         key = f"{idempotency_key or uuid.uuid4()}:{question_id}"
-        try: runs.append(await create_run(session, redis, question_id, payload.checkTypes, key, "batch", batch.id))
+        try: runs.append(await create_run(session, redis, question_id, payload.checkTypes, key, "batch", batch.id, model.id))
+        except ActiveModelConflictError as exc: raise HTTPException(409, str(exc)) from exc
         except LookupError: batch.failed_count += 1
     await session.commit()
     return {"batchId": batch.id, "runIds": [item.id for item in runs], "status": batch.status, "deadlineAt": batch.deadline_at}
@@ -388,6 +421,7 @@ async def start_batch(payload: BatchCheckRequest, current_user: User = Depends(g
 def run_view(run: CheckRun) -> dict[str, Any]:
     return {"id": str(run.id), "questionId": run.question_id, "batchId": str(run.batch_id) if run.batch_id else None,
         "checkTypes": run.check_types, "priority": run.priority, "status": run.status,
+        "model": run.model_versions or get_audit_model().snapshot(),
         "createdAt": run.created_at.isoformat(), "startedAt": run.started_at.isoformat() if run.started_at else None,
         "completedAt": run.completed_at.isoformat() if run.completed_at else None}
 

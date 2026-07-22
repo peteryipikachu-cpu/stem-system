@@ -34,9 +34,11 @@ flowchart LR
 
 | 目录 | 说明 |
 | --- | --- |
-| [`frontend/`](frontend/README.md) | Next.js 16 + React 19 前端，题目管理、导入、审核进度与结果展示。 |
-| [`backend/`](backend/README.md) | FastAPI API、PostgreSQL 数据模型、Alembic 迁移与 SSE 接口。 |
-| [`worker/`](worker/README.md) | Redis 队列消费者、模型调用、限流、重试与审核结果持久化。 |
+| [`frontend/app/`](frontend/app/README.md) | Next.js 16 + React 19 前端，题目管理、导入、审核进度与结果展示。 |
+| [`backend/app/`](backend/app/README.md) | FastAPI API、PostgreSQL 数据模型、Alembic 迁移与 SSE 接口。 |
+| [`worker/app/`](worker/app/README.md) | Redis 队列消费者、模型调用、限流、重试与审核结果持久化。 |
+
+三个服务的完整源码已直接纳入本仓库，而非 Git 子模块。因此即使对应 GitLab 仓库暂时不可访问，也可以在 GitHub 中完整浏览、克隆和恢复当前版本。GitLab 中的三个服务仓库仍可独立开发。
 
 ## 核心能力
 
@@ -92,7 +94,7 @@ flowchart LR
 ### 1. 配置并启动 API
 
 ```bash
-cd backend
+cd backend/app
 cp .env.example .env
 # 编辑 .env，至少确认 DATABASE_URL、REDIS_URL、AUTH_SECRET 和管理员账号配置
 
@@ -110,9 +112,9 @@ API 文档默认位于 `http://localhost:8000/docs`。
 ### 2. 启动 Worker
 
 ```bash
-cd worker
+cd worker/app
 cp .env.example .env
-# 必须与 backend/.env 使用同一个 DATABASE_URL、REDIS_URL；填写模型服务凭据
+# 必须与 backend/app/.env 使用同一个 DATABASE_URL、REDIS_URL；填写模型服务凭据
 
 python3 -m venv .venv
 . .venv/bin/activate
@@ -125,7 +127,7 @@ python -m app.worker
 ### 3. 启动前端
 
 ```bash
-cd frontend
+cd frontend/app
 cp .env.example .env.local
 npm ci
 npm run dev
@@ -137,13 +139,13 @@ npm run dev
 
 ```bash
 # 前端
-cd frontend && npm run lint && npm run build
+cd frontend/app && npm run lint && npm run build
 
 # 后端
-cd backend && pytest && ruff check .
+cd backend/app && pytest && ruff check .
 
 # Worker
-cd worker && pytest && ruff check .
+cd worker/app && pytest && ruff check .
 ```
 
 ## 部署与安全提示

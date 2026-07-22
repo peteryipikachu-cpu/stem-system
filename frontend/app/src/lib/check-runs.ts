@@ -1,3 +1,5 @@
+import type { AuditModelId } from "@/lib/audit-models";
+
 export interface CheckRunAccepted {
   checkRunId: string;
   status: string;
@@ -38,6 +40,7 @@ export interface CheckRunEvent {
   result?: string;
   detail?: unknown;
   message?: string;
+  model?: { id: string; label: string; provider: string; passK: number; difficultyThreshold: number };
 }
 
 export interface CheckRunStatus {
@@ -47,6 +50,7 @@ export interface CheckRunStatus {
   checkTypes: string[];
   priority: string;
   status: string;
+  model: { id: string; label: string; provider: string; passK: number; difficultyThreshold: number };
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -62,16 +66,19 @@ async function accept<T>(url: string, body: unknown): Promise<T> {
     headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey() },
     body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  if (!response.ok) {
+    const data = await response.json().catch(() => null) as { detail?: unknown } | null;
+    throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${response.status}`);
+  }
   return response.json() as Promise<T>;
 }
 
-export function startCheck(questionId: number, checkTypes: string[]) {
-  return accept<CheckRunAccepted>(`/api/questions/${questionId}/check`, { checkTypes });
+export function startCheck(questionId: number, checkTypes: string[], model?: AuditModelId) {
+  return accept<CheckRunAccepted>(`/api/questions/${questionId}/check`, { checkTypes, model });
 }
 
-export function startBatch(questionIds: number[], checkTypes: string[], deadlineAt?: string) {
-  return accept<BatchAccepted>("/api/check-batches", { questionIds, checkTypes, deadlineAt });
+export function startBatch(questionIds: number[], checkTypes: string[], model?: AuditModelId, deadlineAt?: string) {
+  return accept<BatchAccepted>("/api/check-batches", { questionIds, checkTypes, model, deadlineAt });
 }
 
 export async function getCheckBatch(batchId: string): Promise<CheckBatchStatus> {

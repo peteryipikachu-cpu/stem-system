@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional, Union
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
@@ -41,6 +41,7 @@ class QuestionUpdate(QuestionInput):
 
 class CheckRequest(BaseModel):
     checkTypes: list[str] = Field(default_factory=lambda: DEFAULT_CHECK_TYPES.copy())
+    model: Optional[str] = None
 
 
 class BatchCheckRequest(CheckRequest):
@@ -67,6 +68,7 @@ class RunView(BaseModel):
     checkTypes: list[str]
     priority: str
     status: str
+    model: Dict[str, Union[str, int]]
     createdAt: datetime
     startedAt: Optional[datetime]
     completedAt: Optional[datetime]

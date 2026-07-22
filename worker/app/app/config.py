@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Optional
-from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,9 +10,8 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://stem:stem@postgres:5432/stem_audit"
     redis_url: str = "redis://redis:6379/0"
-    cors_origins: str = "http://localhost:3000"
     worker_id: str = "worker-1"
-    worker_concurrency: int = 8
+    worker_concurrency: int = 12
     # 单次深度推理可持续 30–50 分钟；租约必须覆盖模型读取超时，避免调用尚未结束就被重复领取。
     lease_seconds: int = 3_900
     poll_interval_ms: int = 500
@@ -40,28 +38,42 @@ class Settings(BaseSettings):
     batch_deadline_hour: int = 8
     batch_manual_review_cutoff_minutes: int = 30
     batch_estimated_model_p95_seconds: int = 60
+    # Comma-separated pool. Each key receives an independent Redis rate-limit bucket.
+    doubao_api_keys: str = ""
+    # Backward-compatible single-key fallback.
     doubao_api_key: Optional[str] = None
+    # APIRoute can use one shared pool for all OpenAI-compatible model routes.
+    apiroute_api_keys: str = ""
+    apiroute_api_key: Optional[str] = None
     # APIRoute exposes the Doubao model through an OpenAI-compatible API.
     doubao_model: str = "doubao-seed-2-0-pro-260215"
     doubao_base_url: str = "https://apiroute.bodenai.net/v1"
+    gemini_api_keys: str = ""
     gemini_api_key: Optional[str] = None
     gemini_model: str = "gemini-3.1-pro-preview"
     gemini_base_url: str = "https://apiroute.bodenai.net/v1"
-    # 首次启动时自动创建的管理员。生产环境必须通过环境变量覆盖默认密码。
-    initial_admin_username: str = "admin"
-    initial_admin_password: str = "Admin@123456"
-    auth_secret: str = "change-this-secret-before-production"
-    auth_session_hours: int = 24
-    auth_cookie_secure: bool = False
 
-    @field_validator("database_url")
-    @classmethod
-    def use_asyncpg_database_driver(cls, value: str) -> str:
-        if value.startswith("postgresql://"):
-            return "postgresql+asyncpg://" + value.removeprefix("postgresql://")
-        if value.startswith("postgres://"):
-            return "postgresql+asyncpg://" + value.removeprefix("postgres://")
-        return value
+    @property
+    def doubao_keys(self) -> list[str]:
+        values = [key.strip() for key in self.doubao_api_keys.split(",") if key.strip()]
+        if self.doubao_api_key and self.doubao_api_key.strip():
+            values.append(self.doubao_api_key.strip())
+        return list(dict.fromkeys([*values, *self.apiroute_keys]))
+
+    @property
+    def apiroute_keys(self) -> list[str]:
+        values = [key.strip() for key in self.apiroute_api_keys.split(",") if key.strip()]
+        if self.apiroute_api_key and self.apiroute_api_key.strip():
+            values.append(self.apiroute_api_key.strip())
+        return list(dict.fromkeys(values))
+
+    @property
+    def gemini_keys(self) -> list[str]:
+        values = [key.strip() for key in self.gemini_api_keys.split(",") if key.strip()]
+        if self.gemini_api_key and self.gemini_api_key.strip():
+            values.append(self.gemini_api_key.strip())
+        # Existing deployments store their shared APIRoute keys in DOUBAO_API_KEYS.
+        return list(dict.fromkeys([*values, *self.apiroute_keys, *self.doubao_keys]))
 
 
 @lru_cache

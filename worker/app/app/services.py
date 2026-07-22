@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import Settings
+from .audit_models import AuditModel, get_audit_model, model_from_snapshot
 from .models import CheckBatch, CheckEvent, CheckResult, CheckRun, CheckWorkItem, Question, QuestionVersion
 from .queue import acquire, doubao_key_candidates, pop_ready as pop_ready_queue, provider_scope, release
 from .schemas import DEFAULT_CHECK_TYPES, VALID_CHECK_TYPES
@@ -178,28 +180,42 @@ async def move_batch_cutoff_to_manual_review(session: AsyncSession, redis: Redis
     return len(affected_runs)
 
 
+def run_audit_model(run: CheckRun) -> AuditModel:
+    return model_from_snapshot(run.model_versions)
+
+
+def work_audit_model(work: CheckWorkItem) -> AuditModel:
+    snapshot = (work.payload or {}).get("model")
+    if snapshot:
+        return model_from_snapshot(snapshot)
+    # Preserve the original provider routing for work queued before this release.
+    return get_audit_model("gemini-3.1-pro-preview") if work.provider == "gemini" else get_audit_model()
+
+
 def make_work(run: CheckRun, check_type: str, stage: str, attempt: int, provider: str,
               status: str = "queued", queue_owner_id: int = 0) -> CheckWorkItem:
     # 同一 CheckRun 内保持幂等；人工重检必须能创建新的工作项，不能与历史失败记录冲突。
     key = f"r:{run.id}|q:{run.question_id}|c:{check_type}|s:{stage}|a:{attempt}|v:{run.prompt_version}"
     return CheckWorkItem(run_id=run.id, question_id=run.question_id, check_type=check_type, stage=stage,
                          attempt=attempt, provider=provider, priority=run.priority, queue_owner_id=queue_owner_id, status=status,
-                         idempotency_key=key, payload={})
+                         idempotency_key=key,
+                         payload={} if provider == "rule" else {"model": run_audit_model(run).snapshot()})
 
 
 def make_check_work_items(run: CheckRun, check_types: list[str], queue_owner_id: int) -> list[CheckWorkItem]:
     works: list[CheckWorkItem] = []
+    model = run_audit_model(run)
     for check_type in check_types:
         if check_type == "latex":
             works.append(make_work(run, check_type, "check", 0, "rule", queue_owner_id=queue_owner_id))
         elif check_type == "difficulty":
-            works.extend(make_work(run, check_type, "solve", i, "doubao", "blocked", queue_owner_id) for i in range(1, 9))
-            works.append(make_work(run, check_type, "equivalence", 0, "doubao", "blocked", queue_owner_id))
+            works.extend(make_work(run, check_type, "solve", i, model.provider, "blocked", queue_owner_id) for i in range(1, model.pass_k + 1))
+            works.append(make_work(run, check_type, "equivalence", 0, model.provider, "blocked", queue_owner_id))
         elif check_type == "answer":
-            works.extend(make_work(run, check_type, "solve", i, "gemini", "blocked", queue_owner_id) for i in range(1, 5))
-            works.append(make_work(run, check_type, "equivalence", 0, "doubao", "blocked", queue_owner_id))
+            works.extend(make_work(run, check_type, "solve", i, model.provider, "blocked", queue_owner_id) for i in range(1, model.pass_k + 1))
+            works.append(make_work(run, check_type, "equivalence", 0, model.provider, "blocked", queue_owner_id))
         elif check_type == "synthesis":
-            works.append(make_work(run, check_type, "synthesis", 0, "doubao", "blocked", queue_owner_id))
+            works.append(make_work(run, check_type, "synthesis", 0, model.provider, "blocked", queue_owner_id))
         else:
             raise ValueError(f"unsupported check type: {check_type}")
     return works
@@ -226,13 +242,17 @@ async def add_check_work_items(session: AsyncSession, redis: Redis, run: CheckRu
 
 
 async def create_run(session: AsyncSession, redis: Redis, question_id: int, check_types: list[str],
-                     idempotency_key: str, priority: str = "interactive", batch_id: Optional[uuid.UUID] = None) -> CheckRun:
+                     idempotency_key: str, priority: str = "interactive", batch_id: Optional[uuid.UUID] = None,
+                     model_id: Optional[str] = None) -> CheckRun:
     types = list(dict.fromkeys(check_types or DEFAULT_CHECK_TYPES))
+    model = get_audit_model(model_id)
     invalid = set(types) - VALID_CHECK_TYPES
     if invalid:
         raise ValueError(f"unsupported check types: {', '.join(sorted(invalid))}")
     existing = await session.scalar(select(CheckRun).where(CheckRun.idempotency_key == idempotency_key))
     if existing:
+        if run_audit_model(existing).id != model.id:
+            raise ValueError("同一幂等请求已使用其他模型创建，不能切换模型")
         return existing
     question = await session.get(Question, question_id, with_for_update=True)
     if not question:
@@ -240,6 +260,8 @@ async def create_run(session: AsyncSession, redis: Redis, question_id: int, chec
     active = await session.scalar(select(CheckRun).where(CheckRun.question_id == question_id,
         CheckRun.status.in_(["queued", "running", "cancelling"])).limit(1))
     if active:
+        if run_audit_model(active).id != model.id:
+            raise ValueError("该题已有使用其他模型的进行中质检，请等待完成或取消后再切换模型")
         current_types = list(active.check_types or [])
         added_types = [check_type for check_type in types if check_type not in current_types]
         if added_types:
@@ -249,16 +271,17 @@ async def create_run(session: AsyncSession, redis: Redis, question_id: int, chec
                 "questionId": question_id,
                 "checkTypes": added_types,
                 "checkRunId": str(active.id),
-                "added": True,
+                "model": model.snapshot(), "added": True,
             })
         return active
     run = CheckRun(question_id=question_id, batch_id=batch_id, check_types=types, priority=priority,
-                   status="queued", idempotency_key=idempotency_key)
+                   status="queued", idempotency_key=idempotency_key, model_versions=model.snapshot())
     question.status = "checking"
     session.add(run)
     await session.flush()
     await add_check_work_items(session, redis, run, types, question.owner_id or 0)
-    await emit(session, redis, run.id, "start", {"questionId": question_id, "checkTypes": types, "checkRunId": str(run.id)})
+    await emit(session, redis, run.id, "start", {"questionId": question_id, "checkTypes": types,
+               "checkRunId": str(run.id), "model": model.snapshot()})
     return run
 
 
@@ -352,21 +375,22 @@ def difficulty_answer_prompt(question: str) -> str:
 
 async def execute_model(work: CheckWorkItem, question: Question, settings: Settings,
                         doubao_api_key: Optional[str] = None) -> tuple[dict[str, Any], list[Any]]:
+    model = work_audit_model(work)
     timeout = httpx.Timeout(connect=30, read=settings.ai_model_read_timeout_seconds, write=30, pool=30)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if work.provider == "doubao":
             api_key = doubao_api_key or settings.doubao_api_key
             if work.stage == "equivalence":
                 answers = work.payload.get("answers", [])
-                prompt = f"参考答案：{question.answer}\\n模型答案：{answers}\\n逐项判断是否数学等价，只输出 YES/NO。"
+                prompt = f"参考答案：{question.answer}\\n模型答案：{answers}\\n逐项判断是否数学等价，每项单独一行，只输出 YES 或 NO。"
                 content, raw = await call_chat(client, settings.doubao_base_url, api_key, {
-                    "model": settings.doubao_model,
+                    "model": model.id,
                     "messages": [{"role": "user", "content": prompt}],
                     "thinking": {"type": "disabled"},
                     "temperature": 0,
                     "max_tokens": 128,
                 })
-                flags = [line.upper().find("YES") >= 0 for line in content.splitlines() if line.strip()]
+                flags = [token == "YES" for token in re.findall(r"\\b(YES|NO)\\b", content.upper())]
                 flags = (flags + [False] * len(answers))[:len(answers)]
                 return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
             if work.stage == "synthesis":
@@ -381,12 +405,12 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
 
 只输出 JSON：
 {{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}"""
-                content, raw = await call_chat(client, settings.doubao_base_url, api_key, {"model": settings.doubao_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800})
+                content, raw = await call_chat(client, settings.doubao_base_url, api_key, {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800})
                 return {"answer": content[:10000]}, [raw]
             # 难度校验只保留最终答案；答案比对阶段则在上方显式关闭思考。
             prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
             content, raw = await call_chat(client, settings.doubao_base_url, api_key, {
-                "model": settings.doubao_model,
+                "model": model.id,
                 "messages": [{"role": "user", "content": prompt}],
                 "thinking": {"type": "enabled"},
                 "reasoning": {"effort": "high"},
@@ -395,16 +419,28 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
             })
             return {"answer": content[:10000]}, [raw]
         if work.provider == "gemini":
+            api_key = settings.gemini_keys[0] if settings.gemini_keys else None
+            if work.stage == "equivalence":
+                answers = work.payload.get("answers", [])
+                prompt = f"参考答案：{question.answer}\\n模型答案：{answers}\\n逐项判断是否数学等价，每项单独一行，只输出 YES 或 NO。"
+                content, raw = await call_chat(client, settings.gemini_base_url, api_key, {
+                    "model": model.id, "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0, "max_tokens": 128,
+                })
+                flags = [token == "YES" for token in re.findall(r"\\b(YES|NO)\\b", content.upper())]
+                flags = (flags + [False] * len(answers))[:len(answers)]
+                return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
             if work.stage == "synthesis":
                 prompt = f"""判断下列题目是否疑似由生成式 AI 生成。只分析 AI 生成痕迹，不能用题目难度、专业性、正确性或标准公式作为证据；证据不足时判定 false。只输出 JSON：{{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}\n题目：{question.question}\n参考答案：{question.answer}"""
             else:
-                prompt = solve_prompt(question.question)
-            content, raw = await call_chat(client, settings.gemini_base_url, settings.gemini_api_key, {"model": settings.gemini_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800 if work.stage == "synthesis" else 1_200})
+                prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
+            content, raw = await call_chat(client, settings.gemini_base_url, api_key, {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800 if work.stage == "synthesis" else 1_200})
             return {"answer": content[:10000]}, [raw]
         raise ValueError(f"unsupported provider: {work.provider}")
 
 
 async def finalize_check(session: AsyncSession, redis: Redis, work: CheckWorkItem, question: Question) -> None:
+    model = work_audit_model(work)
     items = (await session.scalars(select(CheckWorkItem).where(CheckWorkItem.run_id == work.run_id,
         CheckWorkItem.check_type == work.check_type))).all()
     if work.check_type == "latex":
@@ -416,8 +452,10 @@ async def finalize_check(session: AsyncSession, redis: Redis, work: CheckWorkIte
         answers = [str((i.result or {}).get("answer", "")) for i in solve_items]
         flags = (work.result or {}).get("equivalences", [])
         correct = sum(1 for value in flags if value)
-        result = "pass" if (correct <= 6 if work.check_type == "difficulty" else correct >= 1) else "fail"
-        detail = {"correctCount": correct, "totalCount": len(solve_items), "threshold": 6 if work.check_type == "difficulty" else None, "responses": [value[:200] for value in answers], "equivalences": flags}
+        result = "pass" if (correct <= model.difficulty_threshold if work.check_type == "difficulty" else correct >= 1) else "fail"
+        detail = {"model": model.snapshot(), "correctCount": correct, "totalCount": len(solve_items),
+                  "threshold": model.difficulty_threshold if work.check_type == "difficulty" else None,
+                  "responses": [value[:200] for value in answers], "equivalences": flags}
         raws = [item.result for item in solve_items] + [work.result]
     elif work.check_type == "synthesis":
         answer = str((work.result or {}).get("answer", ""))
@@ -426,12 +464,12 @@ async def finalize_check(session: AsyncSession, redis: Redis, work: CheckWorkIte
             parsed = json.loads(answer[answer.find("{"):answer.rfind("}") + 1])
         except (ValueError, json.JSONDecodeError):
             pass
-        detail = {"isSynthetic": bool(parsed.get("is_synthetic", False)), "confidence": parsed.get("confidence", 0), "reasons": parsed.get("reasons", []), "ruleViolations": []}
+        detail = {"model": model.snapshot(), "isSynthetic": bool(parsed.get("is_synthetic", False)), "confidence": parsed.get("confidence", 0), "reasons": parsed.get("reasons", []), "ruleViolations": []}
         result = "fail" if detail["isSynthetic"] and detail["confidence"] > 70 else "warning" if detail["isSynthetic"] else "pass"
         raws = [work.result]
     else:
         answer = str((work.result or {}).get("answer", ""))
-        detail = {"modelAnswer": answer[:300], "isCorrect": False, "confidence": 20}
+        detail = {"model": model.snapshot(), "modelAnswer": answer[:300], "isCorrect": False, "confidence": 20}
         result = "pass"
         raws = [work.result]
     existing = await session.scalar(select(CheckResult).where(CheckResult.question_id == question.id, CheckResult.check_type == work.check_type))
@@ -439,7 +477,7 @@ async def finalize_check(session: AsyncSession, redis: Redis, work: CheckWorkIte
         existing.result, existing.detail, existing.raw_responses = result, detail, raws
     else:
         session.add(CheckResult(question_id=question.id, check_type=work.check_type, result=result, detail=detail, raw_responses=raws))
-    await emit(session, redis, work.run_id, "progress", {"questionId": question.id, "checkType": work.check_type, "status": "done", "result": result, "detail": detail})
+    await emit(session, redis, work.run_id, "progress", {"questionId": question.id, "checkType": work.check_type, "status": "done", "result": result, "detail": detail, "model": model.snapshot()})
 
 
 async def complete_run_if_ready(session: AsyncSession, redis: Redis, run: CheckRun) -> None:
@@ -631,7 +669,7 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
                 CheckWorkItem.check_type == work.check_type,
                 CheckWorkItem.stage == "solve",
             ))).all()
-            work.payload = {"answers": [str((item.result or {}).get("answer", "")) for item in solves]}
+            work.payload = {**(work.payload or {}), "answers": [str((item.result or {}).get("answer", "")) for item in solves]}
         await emit(session, redis, work.run_id, "progress", {
             "questionId": work.question_id, "checkType": work.check_type, "status": "running",
             "provider": provider, "stage": stage,
