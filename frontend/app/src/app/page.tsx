@@ -116,11 +116,12 @@ function getCheckSummary(checkResults: CheckResult[]) {
 
   const isSynthetic =
     synthesisResult?.result === "fail" || synthesisResult?.result === "warning";
+  const needsManualReview = synthesisResult?.result === "manual_review";
 
   const hasFailure = checkResults.some((r) => r.result === "fail");
   const hasWarning = checkResults.some((r) => r.result === "warning");
 
-  return { isSynthetic, hasFailure, hasWarning, synthesisResult };
+  return { isSynthetic, needsManualReview, hasFailure, hasWarning, synthesisResult };
 }
 
 /** 判断是否合格：latex/difficulty/answer/synthesis 全部 pass */
@@ -597,6 +598,7 @@ export default function HomePage() {
         const summary = getCheckSummary(record.checkResults);
         if (!summary) return <Tag>未检测</Tag>;
         if (summary.isSynthetic) return <Tag color="red">是</Tag>;
+        if (summary.needsManualReview) return <Tag>未检测</Tag>;
         if (summary.hasWarning) return <Tag color="orange">疑似</Tag>;
         return <Tag color="green">否</Tag>;
       },
