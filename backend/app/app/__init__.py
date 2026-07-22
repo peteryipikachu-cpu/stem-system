@@ -1,0 +1,1 @@
+"""STEM audit FastAPI backend."""

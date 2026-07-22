@@ -1,0 +1,9 @@
+.DS_Store
+app/node_modules/
+app/.next/
+app/out/
+app/coverage/
+app/*.tsbuildinfo
+app/next-env.d.ts
+app/.env*
+!app/.env.example
