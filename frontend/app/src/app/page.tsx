@@ -332,7 +332,24 @@ export default function HomePage() {
     }
   };
 
-  const handleCheck = (id: number, checkTypes?: string[]) => setModelRequest({ kind: "single", id, checkTypes });
+  const openSingleModelSelection = (id: number, checkTypes?: string[]) => {
+    setModelRequest({ kind: "single", id, checkTypes });
+  };
+
+  const handleCheck = (question: Question, checkTypes?: string[]) => {
+    if (!question.checkResults?.length) {
+      openSingleModelSelection(question.id, checkTypes);
+      return;
+    }
+
+    Modal.confirm({
+      title: "已有结果",
+      content: "当前题目已有质检结果，是否重新检测？",
+      okText: "重新检测",
+      cancelText: "取消",
+      onOk: () => openSingleModelSelection(question.id, checkTypes),
+    });
+  };
 
   const handleExport = async () => {
     setExporting(true);
@@ -444,7 +461,31 @@ export default function HomePage() {
     }
   };
 
-  const handleBatchCheck = () => setModelRequest({ kind: "batch" });
+  const openBatchModelSelection = () => setModelRequest({ kind: "batch" });
+
+  const handleBatchCheck = () => {
+    const pendingQuestions = (data?.items || [])
+      .filter((question) => question.status === "pending" && !checkingIds.has(question.id));
+
+    if (pendingQuestions.length === 0) {
+      message.info("没有待检测的题目");
+      return;
+    }
+
+    const existingResultCount = pendingQuestions.filter((question) => question.checkResults?.length).length;
+    if (existingResultCount === 0) {
+      openBatchModelSelection();
+      return;
+    }
+
+    Modal.confirm({
+      title: "已有结果",
+      content: `本次待检测题目中有 ${existingResultCount} 道已有质检结果，是否重新检测？`,
+      okText: "重新检测",
+      cancelText: "取消",
+      onOk: openBatchModelSelection,
+    });
+  };
 
   const confirmModel = async (model: AuditModelId) => {
     if (!modelRequest) return;
@@ -622,7 +663,7 @@ export default function HomePage() {
             type="primary"
             icon={<PlayCircleOutlined />}
             loading={checkingIds.has(record.id)}
-            onClick={() => handleCheck(record.id)}
+            onClick={() => handleCheck(record)}
           >
             质检
           </Button>
