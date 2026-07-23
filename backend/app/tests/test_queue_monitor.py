@@ -60,3 +60,15 @@ def test_ready_dependency_left_blocked_is_stuck() -> None:
 
     assert diagnosis["health"] == "stuck"
     assert diagnosis["label"] == "依赖未唤醒"
+
+
+def test_unresolved_manual_review_is_reported_as_waiting_for_admin() -> None:
+    diagnosis = queue_run_diagnosis([work(status="manual_review")], NOW, True, 900)
+
+    assert diagnosis == {"health": "normal", "label": "待人工复核", "reason": "当前没有活跃工作项，等待管理员处理"}
+
+
+def test_completed_manual_review_is_not_reported_as_unresolved() -> None:
+    diagnosis = queue_run_diagnosis([work(status="manual_review_completed")], NOW, True, 900)
+
+    assert diagnosis["label"] == "人工复核已完成"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Dict, Optional, Union
+from typing import Dict, Literal, Optional, Union
 from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
@@ -99,3 +99,9 @@ class UserCreate(BaseModel):
 
 class PasswordReset(BaseModel):
     password: str = Field(min_length=8, max_length=256)
+
+
+class ManualReviewResolutionRequest(BaseModel):
+    """Administrator decision for work items awaiting manual review."""
+
+    action: Literal["completed", "archived"]

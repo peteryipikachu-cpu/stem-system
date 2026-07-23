@@ -23,15 +23,17 @@ from .auth import SESSION_COOKIE, create_session_token, ensure_initial_admin, ge
 from .db import SessionLocal, engine, get_session
 from .models import Base, CheckBatch, CheckEvent, CheckRun, CheckWorkItem, Question, QuestionVersion, User
 from .queue import provider_limit
-from .schemas import AcceptedBatch, AcceptedRun, BatchCheckRequest, CheckRequest, LoginRequest, PasswordReset, QuestionCreate, QuestionUpdate, UserCreate
-from .services import ActiveModelConflictError, create_run, question_json, question_snapshot_json, question_version_json
+from .schemas import AcceptedBatch, AcceptedRun, BatchCheckRequest, CheckRequest, LoginRequest, ManualReviewResolutionRequest, PasswordReset, QuestionCreate, QuestionUpdate, UserCreate
+from .services import ActiveModelConflictError, create_run, emit, question_json, question_snapshot_json, question_version_json
 
 settings = get_settings()
 redis = Redis.from_url(settings.redis_url, decode_responses=True)
 
 ACTIVE_QUEUE_STATUSES = {"queued", "running", "blocked"}
-QUEUE_MONITOR_STATUSES = ACTIVE_QUEUE_STATUSES | {"manual_review"}
-TERMINAL_WORK_STATUSES = {"completed", "failed", "dead", "manual_review", "cancelled"}
+UNRESOLVED_MANUAL_REVIEW_STATUS = "manual_review"
+RESOLVED_MANUAL_REVIEW_STATUSES = {"manual_review_completed", "manual_review_archived"}
+QUEUE_MONITOR_STATUSES = ACTIVE_QUEUE_STATUSES | {UNRESOLVED_MANUAL_REVIEW_STATUS} | RESOLVED_MANUAL_REVIEW_STATUSES
+TERMINAL_WORK_STATUSES = {"completed", "failed", "dead", "manual_review", "manual_review_completed", "manual_review_archived", "cancelled"}
 DEPENDENCY_STALL_GRACE_SECONDS = 30
 
 
@@ -154,7 +156,14 @@ def queue_run_diagnosis(run_works: list[CheckWorkItem], now: datetime, worker_on
     """Classify a run without treating a valid long model call as an outage."""
     active = [item for item in run_works if item.status in ACTIVE_QUEUE_STATUSES]
     if not active:
-        return {"health": "normal", "label": "已转人工复核", "reason": "当前没有活跃工作项"}
+        statuses = {item.status for item in run_works}
+        if UNRESOLVED_MANUAL_REVIEW_STATUS in statuses:
+            return {"health": "normal", "label": "待人工复核", "reason": "当前没有活跃工作项，等待管理员处理"}
+        if "manual_review_completed" in statuses:
+            return {"health": "normal", "label": "人工复核已完成", "reason": "人工复核队列项已处理"}
+        if "manual_review_archived" in statuses:
+            return {"health": "normal", "label": "人工复核已归档", "reason": "人工复核队列项已归档"}
+        return {"health": "normal", "label": "已结束", "reason": "当前没有活跃工作项"}
     if not worker_online:
         return {"health": "stuck", "label": "Worker 离线", "reason": "存在活跃任务，但未检测到存活 Worker 心跳"}
     expired = [item for item in active if item.status == "running" and item.lease_expires_at and item.lease_expires_at < now]
@@ -537,6 +546,8 @@ async def admin_queue_monitor(request: Request, _: User = Depends(require_admin)
         "running": {"running"},
         "blocked": {"blocked"},
         "manual_review": {"manual_review"},
+        "manual_review_completed": {"manual_review_completed"},
+        "manual_review_archived": {"manual_review_archived"},
     }
     if status_filter not in status_map:
         raise HTTPException(422, "不支持的队列状态筛选")
@@ -616,7 +627,7 @@ async def admin_queue_monitor(request: Request, _: User = Depends(require_admin)
         status_counts: dict[str, int] = {}
         for work in works:
             status_counts[work.status] = status_counts.get(work.status, 0) + 1
-        diagnosis = diagnoses.get(run.id, {"health": "normal", "label": "已转人工复核", "reason": "当前没有活跃工作项"})
+        diagnosis = diagnoses.get(run.id, queue_run_diagnosis(works, now, worker_online, queue_wait_seconds))
         items.append({
             "id": str(run.id), "question": {"id": question.id, "title": question.title},
             "requestedBy": _queue_user_view(requester), "questionOwner": _queue_user_view(owner),
@@ -633,7 +644,7 @@ async def admin_queue_monitor(request: Request, _: User = Depends(require_admin)
     ]
     status_counts = {state: sum(work.status == state for work in active_works) for state in ACTIVE_QUEUE_STATUSES}
     manual_review_count = await session.scalar(
-        select(func.count(CheckWorkItem.id)).where(CheckWorkItem.status == "manual_review")
+        select(func.count(CheckWorkItem.id)).where(CheckWorkItem.status == UNRESOLVED_MANUAL_REVIEW_STATUS)
     ) or 0
     return {
         "generatedAt": now.isoformat(),
@@ -646,6 +657,52 @@ async def admin_queue_monitor(request: Request, _: User = Depends(require_admin)
         },
         "total": total, "items": items, "page": page, "pageSize": page_size,
     }
+
+
+@app.post("/api/admin/queue/check-runs/{run_id}/manual-review")
+async def resolve_manual_review(
+    run_id: uuid.UUID,
+    payload: ManualReviewResolutionRequest,
+    current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Resolve the operational queue record without changing the audit result itself."""
+    run = await session.get(CheckRun, run_id, with_for_update=True)
+    if not run:
+        raise HTTPException(404, "质检任务不存在")
+    works = (await session.scalars(
+        select(CheckWorkItem)
+        .where(CheckWorkItem.run_id == run_id, CheckWorkItem.status == UNRESOLVED_MANUAL_REVIEW_STATUS)
+        .with_for_update()
+    )).all()
+    if not works:
+        raise HTTPException(409, "当前任务没有待处理的人工复核项")
+
+    resolved_status = "manual_review_completed" if payload.action == "completed" else "manual_review_archived"
+    now = datetime.now(timezone.utc)
+    for work in works:
+        work.status = resolved_status
+        work.completed_at = now
+        work.lease_owner = None
+        work.lease_expires_at = None
+
+    active_work = await session.scalar(select(CheckWorkItem.id).where(
+        CheckWorkItem.run_id == run_id,
+        CheckWorkItem.status.in_(ACTIVE_QUEUE_STATUSES),
+    ).limit(1))
+    if not active_work:
+        run.status = resolved_status
+        run.completed_at = run.completed_at or now
+    await emit(session, redis, run.id, "manual_review_resolved", {
+        "questionId": run.question_id,
+        "checkRunId": str(run.id),
+        "status": resolved_status,
+        "action": payload.action,
+        "resolvedCount": len(works),
+        "resolvedBy": {"id": current_user.id, "username": current_user.username},
+    })
+    await session.commit()
+    return {"runId": str(run.id), "status": run.status, "resolvedStatus": resolved_status, "resolvedCount": len(works)}
 
 
 @app.get("/api/manual-reviews")

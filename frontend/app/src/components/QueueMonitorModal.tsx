@@ -3,7 +3,7 @@
 import { useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
-import { Alert, Button, Col, Modal, Row, Select, Space, Statistic, Table, Tag, Typography } from "antd";
+import { Alert, Button, Col, message, Modal, Row, Select, Space, Statistic, Table, Tag, Typography } from "antd";
 import { ReloadOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { CHECK_TYPE_LABELS, type CheckType } from "@/types";
@@ -11,7 +11,7 @@ import { auditModelLabel } from "@/lib/audit-models";
 
 const { Text } = Typography;
 
-type QueueStatus = "active" | "all" | "queued" | "running" | "blocked" | "manual_review";
+type QueueStatus = "active" | "all" | "queued" | "running" | "blocked" | "manual_review" | "manual_review_completed" | "manual_review_archived";
 type QueueHealth = "all" | "normal" | "attention" | "stuck";
 
 interface QueueUser {
@@ -87,6 +87,18 @@ async function fetcher(url: string): Promise<QueueResponse> {
   return data as QueueResponse;
 }
 
+async function resolveManualReview(runId: string, action: "completed" | "archived"): Promise<void> {
+  const response = await fetch(`/api/admin/queue/check-runs/${runId}/manual-review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
+  const text = await response.text();
+  let data: { detail?: string } = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { /* 保留服务端非 JSON 错误文本 */ }
+  if (!response.ok) throw new Error(data.detail || text || "人工复核状态更新失败");
+}
+
 function formatDate(value: string | null): string {
   if (!value) return "-";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
@@ -105,16 +117,23 @@ function healthTag(health: QueueHealth, label: string) {
 }
 
 function workStatusTag(status: string) {
-  const color = status === "running" ? "processing" : status === "queued" ? "blue" : status === "blocked" ? "default" : status === "manual_review" ? "warning" : "success";
-  const label: Record<string, string> = { queued: "排队中", running: "执行中", blocked: "等待依赖", manual_review: "人工复核", completed: "已完成", cancelled: "已取消" };
+  const color = status === "running" ? "processing" : status === "queued" ? "blue" : status === "blocked" ? "default" : status === "manual_review" ? "warning" : status === "manual_review_archived" ? "default" : "success";
+  const label: Record<string, string> = {
+    queued: "排队中", running: "执行中", blocked: "等待依赖", manual_review: "待人工复核",
+    manual_review_completed: "人工复核已完成", manual_review_archived: "人工复核已归档",
+    completed: "已完成", cancelled: "已取消",
+  };
   return <Tag color={color}>{label[status] || status}</Tag>;
 }
 
 export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalProps) {
+  const [modal, modalContextHolder] = Modal.useModal();
+  const [messageApi, messageContextHolder] = message.useMessage();
   const [status, setStatus] = useState<QueueStatus>("active");
   const [health, setHealth] = useState<QueueHealth>("all");
   const [provider, setProvider] = useState<string>();
   const [page, setPage] = useState(1);
+  const [resolvingRunId, setResolvingRunId] = useState<string>();
   const params = new URLSearchParams({ status, health, page: String(page), pageSize: "20" });
   if (provider) params.set("provider", provider);
   const { data, error, isLoading, mutate } = useSWR<QueueResponse>(
@@ -122,6 +141,31 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     fetcher,
     { refreshInterval: open ? 5000 : 0, revalidateOnFocus: true },
   );
+
+  const requestManualReviewResolution = (run: QueueRun, action: "completed" | "archived") => {
+    const label = action === "completed" ? "完成人工复核" : "归档人工复核";
+    modal.confirm({
+      title: label,
+      content: action === "completed"
+        ? "将该质检任务的待人工复核工作项标记为已完成，并从当前待处理统计中移除。不会更改题目的质检结论。"
+        : "将该质检任务的待人工复核工作项归档，并从当前待处理统计中移除。不会更改题目的质检结论。",
+      okText: label,
+      cancelText: "取消",
+      onOk: async () => {
+        setResolvingRunId(run.id);
+        try {
+          await resolveManualReview(run.id, action);
+          messageApi.success(`${label}成功`);
+          await mutate();
+        } catch (requestError) {
+          messageApi.error(requestError instanceof Error ? requestError.message : `${label}失败`);
+          throw requestError;
+        } finally {
+          setResolvingRunId(undefined);
+        }
+      },
+    });
+  };
 
   const columns: ColumnsType<QueueRun> = [
     {
@@ -140,6 +184,15 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     {
       title: "诊断", width: 220,
       render: (_, run) => <span>{healthTag(run.diagnosis.health, run.diagnosis.label)}<Text type="secondary">{run.diagnosis.reason}</Text></span>,
+    },
+    {
+      title: "操作", width: 200,
+      render: (_, run) => (run.workSummary.manual_review || 0) > 0 ? (
+        <Space size={6}>
+          <Button size="small" type="primary" loading={resolvingRunId === run.id} onClick={() => requestManualReviewResolution(run, "completed")}>完成复核</Button>
+          <Button size="small" disabled={resolvingRunId === run.id} onClick={() => requestManualReviewResolution(run, "archived")}>归档</Button>
+        </Space>
+      ) : "-",
     },
   ];
 
@@ -162,12 +215,15 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
   const workerStateColor = !summary ? "#8c8c8c" : summary.workerOnline ? "#3f8600" : "#cf1322";
   return (
     <Modal title="队列监控" open={open} onCancel={onClose} width={1480} footer={<Button onClick={onClose}>关闭</Button>} destroyOnHidden>
+      {modalContextHolder}
+      {messageContextHolder}
       <Space wrap style={{ width: "100%", justifyContent: "space-between", marginBottom: 16 }}>
         <Space wrap>
           <Select value={status} onChange={(value) => { setStatus(value); setPage(1); }} style={{ width: 140 }} options={[
             { value: "active", label: "当前活跃任务" }, { value: "queued", label: "排队中" },
             { value: "running", label: "执行中" }, { value: "blocked", label: "等待依赖" },
-            { value: "manual_review", label: "人工复核" }, { value: "all", label: "全部监控任务" },
+            { value: "manual_review", label: "待人工复核" }, { value: "manual_review_completed", label: "人工复核已完成" },
+            { value: "manual_review_archived", label: "人工复核已归档" }, { value: "all", label: "全部监控任务" },
           ]} />
           <Select value={health} onChange={(value) => { setHealth(value); setPage(1); }} style={{ width: 130 }} options={[
             { value: "all", label: "全部健康状态" }, { value: "normal", label: "正常" },
@@ -199,14 +255,14 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
         <Col span={3}><Statistic title="排队中" value={summary?.queuedCount || 0} /></Col>
         <Col span={3}><Statistic title="执行中" value={summary?.runningCount || 0} /></Col>
         <Col span={3}><Statistic title="等待依赖" value={summary?.blockedCount || 0} /></Col>
-        <Col span={3}><Statistic title="人工复核" value={summary?.manualReviewCount || 0} /></Col>
+        <Col span={3}><Statistic title="当前未解决的人工复核" value={summary?.manualReviewCount || 0} /></Col>
         <Col span={3}><Statistic title="需关注" value={summary?.attentionCount || 0} styles={{ content: { color: "#d48806" } }} /></Col>
         <Col span={3}><Statistic title="卡住" value={summary?.stuckCount || 0} styles={{ content: { color: "#cf1322" } }} /></Col>
         <Col span={3}><Statistic title="最长可执行等待" value={formatDuration(summary?.oldestReadyWaitSeconds || 0)} /></Col>
       </Row>
 
       <Table<QueueRun>
-        rowKey="id" loading={isLoading} columns={columns} dataSource={data?.items || []} scroll={{ x: 1450 }}
+        rowKey="id" loading={isLoading} columns={columns} dataSource={data?.items || []} scroll={{ x: 1650 }}
         expandable={{
           expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} columns={workColumns} dataSource={run.workItems} scroll={{ x: 1130 }} />,
           rowExpandable: (run) => run.workItems.length > 0,
