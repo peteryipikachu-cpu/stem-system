@@ -39,7 +39,7 @@ import LatexRenderer from "@/components/LatexRenderer";
 import ModelSelectionModal from "@/components/ModelSelectionModal";
 import { CHECK_TYPE_LABELS, CheckType } from "@/types";
 import { getCheckRun, startCheck, subscribeCheckRun, type CheckRunEvent } from "@/lib/check-runs";
-import { auditModelLabel, type AuditModelId } from "@/lib/audit-models";
+import { auditModelLabel, DEFAULT_AUDIT_MODEL_ID, type AuditModelId } from "@/lib/audit-models";
 
 const { Header, Content } = Layout;
 const { Title, Text } = Typography;
@@ -522,6 +522,10 @@ export default function QuestionDetailPage() {
   };
 
   const openModelSelection = (checkTypes: string[]) => {
+    if (checkTypes.length > 0 && checkTypes.every((checkType) => checkType === "latex")) {
+      void startCheckWithModel(checkTypes, DEFAULT_AUDIT_MODEL_ID);
+      return;
+    }
     setPendingCheckTypes(checkTypes);
   };
 

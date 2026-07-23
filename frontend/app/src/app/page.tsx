@@ -46,7 +46,7 @@ import {
   type CheckBatchStatus,
   type CheckRunEvent,
 } from "@/lib/check-runs";
-import type { AuditModelId } from "@/lib/audit-models";
+import { DEFAULT_AUDIT_MODEL_ID, type AuditModelId } from "@/lib/audit-models";
 
 const { Header, Content } = Layout;
 const { Title, Text } = Typography;
@@ -351,6 +351,10 @@ export default function HomePage() {
   };
 
   const openSingleModelSelection = (id: number, checkTypes?: string[]) => {
+    if (checkTypes?.length && checkTypes.every((checkType) => checkType === "latex")) {
+      void startSingleCheck(id, checkTypes, DEFAULT_AUDIT_MODEL_ID);
+      return;
+    }
     setModelRequest({ kind: "single", id, checkTypes });
   };
 
