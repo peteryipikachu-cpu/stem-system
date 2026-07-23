@@ -9,6 +9,7 @@ from .services import (
     recover_expired_leases,
     recover_queued_work,
     recover_ready_dependencies,
+    reconcile_orphaned_runs,
     worker_once,
 )
 
@@ -36,7 +37,8 @@ async def run() -> None:
             dependencies = await recover_ready_dependencies(session, redis)
             await recover_queued_work(session, redis)
             cutoff = await move_batch_cutoff_to_manual_review(session, redis, settings)
-            if recovered or dependencies or cutoff:
+            reconciled = await reconcile_orphaned_runs(session, redis)
+            if recovered or dependencies or cutoff or reconciled:
                 await session.commit()
 
     try:

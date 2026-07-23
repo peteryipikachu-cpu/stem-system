@@ -462,6 +462,29 @@ async def complete_run_if_ready(session: AsyncSession, redis: Redis, run: CheckR
     await emit(session, redis, run.id, "complete", {"questionId": run.question_id, "checkRunId": str(run.id), "status": run.status})
 
 
+async def reconcile_orphaned_runs(session: AsyncSession, redis: Redis) -> int:
+    """Finish stale active runs whose work items are already all terminal.
+
+    A Worker restart or an earlier process interruption can leave a CheckRun in
+    ``queued``/``running`` after its final work item has already been written.
+    Redis recovery cannot see these rows because none are runnable, so reconcile
+    them from PostgreSQL during the periodic recovery pass.
+    """
+    has_work = select(CheckWorkItem.id).where(CheckWorkItem.run_id == CheckRun.id).exists()
+    has_active_work = select(CheckWorkItem.id).where(
+        CheckWorkItem.run_id == CheckRun.id,
+        CheckWorkItem.status.in_(["queued", "blocked", "running"]),
+    ).exists()
+    runs = (await session.scalars(
+        select(CheckRun)
+        .where(CheckRun.status.in_(["queued", "running"]), has_work, ~has_active_work)
+        .with_for_update(skip_locked=True)
+    )).all()
+    for run in runs:
+        await complete_run_if_ready(session, redis, run)
+    return len(runs)
+
+
 def provider_error(exc: Exception) -> tuple[str, Optional[int], str, bool]:
     status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
     if isinstance(exc, httpx.TimeoutException):
