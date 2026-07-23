@@ -45,6 +45,7 @@ const { Header, Content } = Layout;
 const { Title, Text } = Typography;
 const RUN_POLL_INTERVAL_MS = 2_500;
 const TERMINAL_RUN_STATUSES = new Set(["completed", "partial_failed", "manual_review", "failed", "cancelled"]);
+const REUSABLE_CHECK_RESULT_STATUSES = new Set(["pass", "fail", "warning"]);
 
 const fetcher = async (url: string) => {
   const response = await fetch(url);
@@ -79,6 +80,11 @@ interface CheckResultData {
   checkType: string;
   result: string;
   detail: string;
+}
+
+function hasReusableCheckResult(result: CheckResultData): boolean {
+  // 上游接口失败会落为 manual_review；它不是可复用的质检结论，允许直接重试。
+  return REUSABLE_CHECK_RESULT_STATUSES.has(result.result);
 }
 
 function finalAnswerOnly(response: string): string {
@@ -523,7 +529,9 @@ export default function QuestionDetailPage() {
     if (isHistorical) return;
 
     // 单项检测只关心该检查项是否已有结果；不能因为其他项已完成而误提示重检。
-    const existingRequestedResults = question?.checkResults?.filter((result) => checkTypes.includes(result.checkType)) || [];
+    const existingRequestedResults = question?.checkResults?.filter(
+      (result) => checkTypes.includes(result.checkType) && hasReusableCheckResult(result),
+    ) || [];
     if (existingRequestedResults.length === 0) {
       openModelSelection(checkTypes);
       return;

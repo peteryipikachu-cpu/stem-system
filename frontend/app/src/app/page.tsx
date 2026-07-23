@@ -58,6 +58,17 @@ interface CheckResult {
   detail: string;
 }
 
+const REUSABLE_CHECK_RESULT_STATUSES = new Set(["pass", "fail", "warning"]);
+
+function hasReusableCheckResult(result: CheckResult): boolean {
+  // manual_review 表示调用未完成，不是可供重检确认复用的质检结论。
+  return REUSABLE_CHECK_RESULT_STATUSES.has(result.result);
+}
+
+function hasReusableCheckResults(results?: CheckResult[]): boolean {
+  return results?.some(hasReusableCheckResult) || false;
+}
+
 interface Question {
   id: number;
   title: string;
@@ -344,7 +355,7 @@ export default function HomePage() {
   };
 
   const handleCheck = (question: Question, checkTypes?: string[]) => {
-    if (!question.checkResults?.length) {
+    if (!hasReusableCheckResults(question.checkResults)) {
       openSingleModelSelection(question.id, checkTypes);
       return;
     }
@@ -488,7 +499,7 @@ export default function HomePage() {
       okText: "确认质检",
       cancelText: "取消",
       onOk: () => {
-        const existingResultCount = targetIds.filter((id) => selectedQuestions[id]?.checkResults?.length).length;
+        const existingResultCount = targetIds.filter((id) => hasReusableCheckResults(selectedQuestions[id]?.checkResults)).length;
         if (existingResultCount === 0) {
           openBatchModelSelection(targetIds);
           return;
