@@ -243,7 +243,7 @@ async def add_check_work_items(session: AsyncSession, redis: Redis, run: CheckRu
 
 async def create_run(session: AsyncSession, redis: Redis, question_id: int, check_types: list[str],
                      idempotency_key: str, priority: str = "interactive", batch_id: Optional[uuid.UUID] = None,
-                     model_id: Optional[str] = None) -> CheckRun:
+                     model_id: Optional[str] = None, requested_by_user_id: Optional[int] = None) -> CheckRun:
     types = list(dict.fromkeys(check_types or DEFAULT_CHECK_TYPES))
     model = get_audit_model(model_id)
     invalid = set(types) - VALID_CHECK_TYPES
@@ -274,7 +274,7 @@ async def create_run(session: AsyncSession, redis: Redis, question_id: int, chec
                 "model": model.snapshot(), "added": True,
             })
         return active
-    run = CheckRun(question_id=question_id, batch_id=batch_id, check_types=types, priority=priority,
+    run = CheckRun(question_id=question_id, requested_by_user_id=requested_by_user_id, batch_id=batch_id, check_types=types, priority=priority,
                    status="queued", idempotency_key=idempotency_key, model_versions=model.snapshot())
     question.status = "checking"
     session.add(run)

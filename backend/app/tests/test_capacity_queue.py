@@ -8,13 +8,13 @@ from app.queue import provider_limit
 from app.services import make_check_work_items, provider_error
 
 
-def test_full_check_creates_sixteen_work_items_with_batch_owner() -> None:
+def test_full_check_creates_default_model_work_items_with_batch_owner() -> None:
     run = CheckRun(id=uuid.uuid4(), question_id=42, priority="batch", prompt_version="v1")
     items = make_check_work_items(run, ["latex", "difficulty", "answer", "synthesis"], queue_owner_id=7)
 
-    assert len(items) == 16
-    assert sum(item.provider == "doubao" for item in items) == 11
-    assert sum(item.provider == "gemini" for item in items) == 4
+    assert len(items) == 20
+    assert sum(item.provider == "doubao" for item in items) == 19
+    assert sum(item.provider == "gemini" for item in items) == 0
     assert sum(item.provider == "rule" for item in items) == 1
     assert {item.queue_owner_id for item in items} == {7}
 

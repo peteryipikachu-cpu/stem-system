@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from redis.asyncio import Redis
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import aliased, selectinload
 
 from .config import get_settings
 from .audit_models import ensure_audit_model_available, get_audit_model
@@ -28,6 +28,11 @@ from .services import ActiveModelConflictError, create_run, question_json, quest
 
 settings = get_settings()
 redis = Redis.from_url(settings.redis_url, decode_responses=True)
+
+ACTIVE_QUEUE_STATUSES = {"queued", "running", "blocked"}
+QUEUE_MONITOR_STATUSES = ACTIVE_QUEUE_STATUSES | {"manual_review"}
+TERMINAL_WORK_STATUSES = {"completed", "failed", "dead", "manual_review", "cancelled"}
+DEPENDENCY_STALL_GRACE_SECONDS = 30
 
 
 @asynccontextmanager
@@ -114,6 +119,84 @@ async def batch_view(session: AsyncSession, batch: CheckBatch) -> dict[str, Any]
         "secondsToDeadline": max(0, int((batch.deadline_at - now).total_seconds())) if batch.deadline_at else None,
         "createdAt": batch.created_at.isoformat(),
     }
+
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _queue_user_view(user: Optional[User]) -> Optional[dict[str, Any]]:
+    return {"id": user.id, "username": user.username} if user else None
+
+
+def _work_item_view(work: CheckWorkItem) -> dict[str, Any]:
+    return {
+        "id": str(work.id), "checkType": work.check_type, "stage": work.stage,
+        "provider": work.provider, "status": work.status, "attemptNo": work.attempt_no,
+        "createdAt": _iso(work.created_at), "updatedAt": _iso(work.updated_at),
+        "availableAt": _iso(work.available_at), "startedAt": _iso(work.started_at),
+        "completedAt": _iso(work.completed_at), "leaseOwner": work.lease_owner,
+        "leaseExpiresAt": _iso(work.lease_expires_at), "error": work.error,
+        "errorCode": work.error_code, "errorStatusCode": work.error_status_code,
+    }
+
+
+def _blocked_dependency_is_ready(work: CheckWorkItem, run_works: list[CheckWorkItem]) -> bool:
+    if work.stage == "equivalence":
+        prerequisites = [item for item in run_works if item.check_type == work.check_type and item.stage == "solve"]
+    else:
+        prerequisites = [item for item in run_works if item.check_type == "latex" and item.stage == "check"]
+    return bool(prerequisites) and all(item.status in TERMINAL_WORK_STATUSES for item in prerequisites)
+
+
+def queue_run_diagnosis(run_works: list[CheckWorkItem], now: datetime, worker_online: bool,
+                        queue_wait_seconds: int) -> dict[str, str]:
+    """Classify a run without treating a valid long model call as an outage."""
+    active = [item for item in run_works if item.status in ACTIVE_QUEUE_STATUSES]
+    if not active:
+        return {"health": "normal", "label": "已转人工复核", "reason": "当前没有活跃工作项"}
+    if not worker_online:
+        return {"health": "stuck", "label": "Worker 离线", "reason": "存在活跃任务，但未检测到存活 Worker 心跳"}
+    expired = [item for item in active if item.status == "running" and item.lease_expires_at and item.lease_expires_at < now]
+    if expired:
+        return {"health": "stuck", "label": "运行租约过期", "reason": "模型工作项的租约已过期，等待 Worker 回收"}
+    stalled_dependencies = [
+        item for item in active
+        if item.status == "blocked" and item.updated_at
+        and (now - item.updated_at).total_seconds() > DEPENDENCY_STALL_GRACE_SECONDS
+        and _blocked_dependency_is_ready(item, run_works)
+    ]
+    if stalled_dependencies:
+        return {"health": "stuck", "label": "依赖未唤醒", "reason": "前置工作项已完成，但后续工作项仍未进入队列"}
+    overdue = [
+        item for item in active
+        if item.status == "queued" and item.available_at <= now and item.created_at
+        and (now - item.created_at).total_seconds() > queue_wait_seconds
+    ]
+    if overdue:
+        return {"health": "attention", "label": "排队时间过长", "reason": f"可执行任务等待已超过 {queue_wait_seconds // 60} 分钟"}
+    if any(item.status == "queued" and item.available_at > now for item in active):
+        return {"health": "normal", "label": "重试等待", "reason": "任务处于退避期，尚未到可执行时间"}
+    if any(item.status == "blocked" for item in active):
+        return {"health": "normal", "label": "等待前置检查", "reason": "前置检查尚未完成"}
+    if any(item.status == "running" for item in active):
+        return {"health": "normal", "label": "执行中", "reason": "Worker 正在处理模型调用"}
+    return {"health": "normal", "label": "等待调度", "reason": "任务已进入待调度队列"}
+
+
+async def worker_heartbeats() -> list[dict[str, Any]]:
+    keys = [key async for key in redis.scan_iter(match="stem:workers:heartbeat:*")]
+    if not keys:
+        return []
+    values = await redis.mget(keys)
+    heartbeats: list[dict[str, Any]] = []
+    for key, value in zip(keys, values):
+        try:
+            seen_at = datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        heartbeats.append({"id": key.rsplit(":", 1)[-1], "seenAt": seen_at.isoformat()})
+    return sorted(heartbeats, key=lambda item: item["seenAt"], reverse=True)
 
 
 @app.get("/healthz")
@@ -368,7 +451,8 @@ async def start_check(question_id: int, payload: CheckRequest, current_user: Use
         model = get_audit_model(payload.model)
         if any(check_type != "latex" for check_type in payload.checkTypes):
             model = ensure_audit_model_available(settings, model.id)
-        run = await create_run(session, redis, question_id, payload.checkTypes, key, model_id=model.id)
+        run = await create_run(session, redis, question_id, payload.checkTypes, key, model_id=model.id,
+                               requested_by_user_id=current_user.id)
         await session.commit()
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
@@ -411,7 +495,8 @@ async def start_batch(payload: BatchCheckRequest, current_user: User = Depends(g
     runs = []
     for question_id in payload.questionIds:
         key = f"{idempotency_key or uuid.uuid4()}:{question_id}"
-        try: runs.append(await create_run(session, redis, question_id, payload.checkTypes, key, "batch", batch.id, model.id))
+        try: runs.append(await create_run(session, redis, question_id, payload.checkTypes, key, "batch", batch.id, model.id,
+                                          current_user.id))
         except ActiveModelConflictError as exc: raise HTTPException(409, str(exc)) from exc
         except LookupError: batch.failed_count += 1
     await session.commit()
@@ -438,6 +523,129 @@ async def get_batch(batch_id: uuid.UUID, current_user: User = Depends(get_curren
     if not batch or not await session.scalar(select(CheckRun.id).join(Question).where(CheckRun.batch_id == batch_id, question_scope(current_user)).limit(1)):
         raise HTTPException(404, "Not found")
     return await batch_view(session, batch)
+
+
+@app.get("/api/admin/queue")
+async def admin_queue_monitor(request: Request, _: User = Depends(require_admin), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    """Return a read-only operational view of current audit work for administrators."""
+    query = request.query_params
+    status_filter = query.get("status", "active").strip()
+    status_map = {
+        "active": ACTIVE_QUEUE_STATUSES,
+        "all": QUEUE_MONITOR_STATUSES,
+        "queued": {"queued"},
+        "running": {"running"},
+        "blocked": {"blocked"},
+        "manual_review": {"manual_review"},
+    }
+    if status_filter not in status_map:
+        raise HTTPException(422, "不支持的队列状态筛选")
+    health_filter = query.get("health", "all").strip()
+    if health_filter not in {"all", "normal", "attention", "stuck"}:
+        raise HTTPException(422, "不支持的健康状态筛选")
+    provider_filter = query.get("provider", "").strip()
+    try:
+        page = max(1, int(query.get("page", "1")))
+        page_size = min(100, max(1, int(query.get("pageSize", "20"))))
+    except ValueError as exc:
+        raise HTTPException(422, "分页参数必须为整数") from exc
+
+    now = datetime.now(timezone.utc)
+    queue_wait_seconds = max(1, settings.ai_queue_max_wait_ms // 1_000)
+    monitor_works = (await session.scalars(
+        select(CheckWorkItem).where(CheckWorkItem.status.in_(QUEUE_MONITOR_STATUSES))
+    )).all()
+    active_works = [work for work in monitor_works if work.status in ACTIVE_QUEUE_STATUSES]
+    all_works_by_run: dict[uuid.UUID, list[CheckWorkItem]] = {}
+    active_works_by_run: dict[uuid.UUID, list[CheckWorkItem]] = {}
+    for work in monitor_works:
+        all_works_by_run.setdefault(work.run_id, []).append(work)
+        if work.status in ACTIVE_QUEUE_STATUSES:
+            active_works_by_run.setdefault(work.run_id, []).append(work)
+
+    heartbeats = await worker_heartbeats()
+    worker_online = bool(heartbeats)
+    diagnoses = {
+        run_id: queue_run_diagnosis(all_works_by_run[run_id], now, worker_online, queue_wait_seconds)
+        for run_id in active_works_by_run
+    }
+    health_counts = {"normal": 0, "attention": 0, "stuck": 0}
+    for diagnosis in diagnoses.values():
+        health_counts[diagnosis["health"]] += 1
+
+    matching_works = [work for work in monitor_works if work.status in status_map[status_filter]]
+    if provider_filter:
+        matching_works = [work for work in matching_works if work.provider == provider_filter]
+    matching_run_ids = {work.run_id for work in matching_works}
+    if health_filter != "all":
+        matching_run_ids = {
+            run_id for run_id in matching_run_ids
+            if diagnoses.get(run_id, {"health": "normal"})["health"] == health_filter
+        }
+
+    runs = (await session.scalars(
+        select(CheckRun).where(CheckRun.id.in_(matching_run_ids)).order_by(CheckRun.created_at.desc())
+    )).all() if matching_run_ids else []
+    total = len(runs)
+    page_runs = runs[(page - 1) * page_size: page * page_size]
+    page_run_ids = [run.id for run in page_runs]
+
+    requested_by = aliased(User)
+    question_owner = aliased(User)
+    rows = (await session.execute(
+        select(CheckRun, Question, requested_by, question_owner)
+        .join(Question, Question.id == CheckRun.question_id)
+        .outerjoin(requested_by, requested_by.id == CheckRun.requested_by_user_id)
+        .outerjoin(question_owner, question_owner.id == Question.owner_id)
+        .where(CheckRun.id.in_(page_run_ids))
+    )).all() if page_run_ids else []
+    row_by_run_id = {run.id: (question, requester, owner) for run, question, requester, owner in rows}
+    page_works = (await session.scalars(
+        select(CheckWorkItem)
+        .where(CheckWorkItem.run_id.in_(page_run_ids))
+        .order_by(CheckWorkItem.created_at.asc())
+    )).all() if page_run_ids else []
+    page_works_by_run: dict[uuid.UUID, list[CheckWorkItem]] = {}
+    for work in page_works:
+        page_works_by_run.setdefault(work.run_id, []).append(work)
+
+    items = []
+    for run in page_runs:
+        question, requester, owner = row_by_run_id[run.id]
+        works = page_works_by_run.get(run.id, [])
+        status_counts: dict[str, int] = {}
+        for work in works:
+            status_counts[work.status] = status_counts.get(work.status, 0) + 1
+        diagnosis = diagnoses.get(run.id, {"health": "normal", "label": "已转人工复核", "reason": "当前没有活跃工作项"})
+        items.append({
+            "id": str(run.id), "question": {"id": question.id, "title": question.title},
+            "requestedBy": _queue_user_view(requester), "questionOwner": _queue_user_view(owner),
+            "status": run.status, "priority": run.priority, "checkTypes": run.check_types,
+            "model": run.model_versions or get_audit_model().snapshot(),
+            "createdAt": _iso(run.created_at), "startedAt": _iso(run.started_at),
+            "diagnosis": diagnosis, "workSummary": status_counts,
+            "workItems": [_work_item_view(work) for work in works],
+        })
+
+    ready_waits = [
+        (now - work.created_at).total_seconds() for work in active_works
+        if work.status == "queued" and work.available_at <= now and work.created_at
+    ]
+    status_counts = {state: sum(work.status == state for work in active_works) for state in ACTIVE_QUEUE_STATUSES}
+    manual_review_count = await session.scalar(
+        select(func.count(CheckWorkItem.id)).where(CheckWorkItem.status == "manual_review")
+    ) or 0
+    return {
+        "generatedAt": now.isoformat(),
+        "summary": {
+            "workerOnline": worker_online, "workers": heartbeats,
+            "queuedCount": status_counts["queued"], "runningCount": status_counts["running"],
+            "blockedCount": status_counts["blocked"], "manualReviewCount": manual_review_count,
+            "attentionCount": health_counts["attention"], "stuckCount": health_counts["stuck"],
+            "oldestReadyWaitSeconds": int(max(ready_waits, default=0)),
+        },
+        "total": total, "items": items, "page": page, "pageSize": page_size,
+    }
 
 
 @app.get("/api/manual-reviews")

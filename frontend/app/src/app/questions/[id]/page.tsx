@@ -268,7 +268,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
         </Space>
       }
       extra={!readOnly ? (
-        <Button size="small" onClick={onRecheck} icon={<SyncOutlined />}>
+        <Button size="small" style={{ width: 94 }} onClick={onRecheck} icon={<SyncOutlined />}>
           重新检测
         </Button>
       ) : null}
@@ -336,6 +336,7 @@ export default function QuestionDetailPage() {
   const [pendingCheckTypes, setPendingCheckTypes] = useState<string[] | null>(null);
   const [startingCheck, setStartingCheck] = useState(false);
   const [form] = Form.useForm<EditQuestionValues>();
+  const [modal, modalContextHolder] = Modal.useModal();
 
   const handleCopy = async (text: string, label: string) => {
     try {
@@ -521,16 +522,23 @@ export default function QuestionDetailPage() {
   const handleCheck = (checkTypes: string[]) => {
     if (isHistorical) return;
 
-    if (!question?.checkResults?.length) {
+    // 单项检测只关心该检查项是否已有结果；不能因为其他项已完成而误提示重检。
+    const existingRequestedResults = question?.checkResults?.filter((result) => checkTypes.includes(result.checkType)) || [];
+    if (existingRequestedResults.length === 0) {
       openModelSelection(checkTypes);
       return;
     }
 
-    Modal.confirm({
+    const label = checkTypes.length === 1
+      ? (CHECK_TYPE_LABELS[checkTypes[0] as CheckType] || checkTypes[0])
+      : "当前选择的检查项";
+
+    modal.confirm({
       title: "已有结果",
-      content: "当前题目已有质检结果，是否重新检测？",
+      content: `${label}已有质检结果，是否重新检测？`,
       okText: "重新检测",
       cancelText: "取消",
+      okButtonProps: { style: { width: 94 } },
       onOk: () => openModelSelection(checkTypes),
     });
   };
@@ -606,6 +614,7 @@ export default function QuestionDetailPage() {
       </Header>
 
       <Content style={{ padding: 24 }}>
+        {modalContextHolder}
         {isHistorical && (
           <Alert
             type="info"
@@ -670,6 +679,7 @@ export default function QuestionDetailPage() {
                   <Text strong style={{ fontSize: 15 }}>题目</Text>
                   <Button
                     size="small"
+                    style={{ width: 64 }}
                     icon={<CopyOutlined />}
                     onClick={() => handleCopy(question.question, "题目")}
                   >复制</Button>
@@ -690,6 +700,7 @@ export default function QuestionDetailPage() {
                         <span>参考答案</span>
                         <Button
                           size="small"
+                          style={{ width: 64 }}
                           icon={<CopyOutlined />}
                           onClick={(e) => { e.stopPropagation(); handleCopy(question.answer, "参考答案"); }}
                         >复制</Button>
@@ -708,6 +719,7 @@ export default function QuestionDetailPage() {
                         <span>解题思路</span>
                         <Button
                           size="small"
+                          style={{ width: 64 }}
                           icon={<CopyOutlined />}
                           onClick={(e) => { e.stopPropagation(); handleCopy(question.solution, "解题思路"); }}
                         >复制</Button>
@@ -741,6 +753,7 @@ export default function QuestionDetailPage() {
                   <Button
                     type="primary"
                     size="small"
+                    style={{ width: 94 }}
                     icon={<PlayCircleOutlined />}
                     loading={recoveredCheckingTypes.size > 0}
                     onClick={() => handleCheck(["latex", "difficulty", "answer", "synthesis"])}
@@ -799,7 +812,7 @@ export default function QuestionDetailPage() {
                         </Space>
                       }
                       extra={!isHistorical ? (
-                        <Button size="small" onClick={() => handleCheck([type])} disabled={isChecking}>
+                        <Button size="small" style={{ width: 94 }} onClick={() => handleCheck([type])} disabled={isChecking}>
                           检测
                         </Button>
                       ) : null}

@@ -25,6 +25,7 @@ import {
   CopyOutlined,
   LogoutOutlined,
   TeamOutlined,
+  DashboardOutlined,
 } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import type { TableRowSelection } from "antd/es/table/interface";
@@ -32,6 +33,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import useSWR from "swr";
 import AccountManagementModal from "@/components/AccountManagementModal";
+import QueueMonitorModal from "@/components/QueueMonitorModal";
 import ImportModal from "@/components/ImportModal";
 import ModelSelectionModal from "@/components/ModelSelectionModal";
 import LatexRenderer from "@/components/LatexRenderer";
@@ -228,6 +230,7 @@ export default function HomePage() {
   const [previewBasis, setPreviewBasis] = useState<{ title: string; content: string } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [accountManagementVisible, setAccountManagementVisible] = useState(false);
+  const [queueMonitorVisible, setQueueMonitorVisible] = useState(false);
   const [versionHistory, setVersionHistory] = useState<Record<number, QuestionVersionSummary[]>>({});
   const [loadingVersionHistory, setLoadingVersionHistory] = useState<Set<number>>(new Set());
   const [selectedQuestionIds, setSelectedQuestionIds] = useState<number[]>([]);
@@ -739,7 +742,10 @@ export default function HomePage() {
         <Tag color={currentUser.role === "admin" ? "purple" : "blue"}>{currentUser.role === "admin" ? "管理员" : "普通用户"}</Tag>
         <Text>{currentUser.username}</Text>
         {currentUser.role === "admin" && (
-          <Button size="small" icon={<TeamOutlined />} onClick={() => setAccountManagementVisible(true)}>账号管理</Button>
+          <>
+            <Button size="small" icon={<DashboardOutlined />} onClick={() => setQueueMonitorVisible(true)}>队列监控</Button>
+            <Button size="small" icon={<TeamOutlined />} onClick={() => setAccountManagementVisible(true)}>账号管理</Button>
+          </>
         )}
         <Button size="small" icon={<LogoutOutlined />} onClick={handleLogout}>退出</Button>
       </Header>
@@ -975,6 +981,7 @@ export default function HomePage() {
         }}
       />
       <AccountManagementModal open={accountManagementVisible} onClose={() => setAccountManagementVisible(false)} />
+      <QueueMonitorModal open={queueMonitorVisible} onClose={() => setQueueMonitorVisible(false)} />
     </Layout>
   );
 }

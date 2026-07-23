@@ -98,8 +98,7 @@ cd backend/app
 cp .env.example .env
 # 编辑 .env，至少确认 DATABASE_URL、REDIS_URL、AUTH_SECRET 和管理员账号配置
 
-python3 -m venv .venv
-. .venv/bin/activate
+conda activate base
 python -m pip install -r requirements.lock
 python -m pip install -e . --no-deps
 
@@ -116,8 +115,7 @@ cd worker/app
 cp .env.example .env
 # 必须与 backend/app/.env 使用同一个 DATABASE_URL、REDIS_URL；填写模型服务凭据
 
-python3 -m venv .venv
-. .venv/bin/activate
+conda activate base
 python -m pip install -r requirements.lock
 python -m pip install -e . --no-deps
 

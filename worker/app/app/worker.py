@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from redis.asyncio import Redis
 from .config import get_settings
@@ -10,6 +11,14 @@ from .services import (
     recover_ready_dependencies,
     worker_once,
 )
+
+
+def worker_heartbeat_key(worker_id: str) -> str:
+    return f"stem:workers:heartbeat:{worker_id}:{os.getpid()}"
+
+
+async def write_worker_heartbeat(redis: Redis, worker_id: str, ttl_seconds: int) -> None:
+    await redis.set(worker_heartbeat_key(worker_id), str(time.time()), ex=max(1, ttl_seconds))
 
 
 async def run() -> None:
@@ -34,6 +43,7 @@ async def run() -> None:
         last_recovery = 0.0
         while True:
             if time.monotonic() - last_recovery >= 5:
+                await write_worker_heartbeat(redis, settings.worker_id, settings.worker_heartbeat_ttl_seconds)
                 await recover_leases()
                 last_recovery = time.monotonic()
             while len(active) < settings.worker_concurrency:

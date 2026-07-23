@@ -14,7 +14,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN" suppressHydrationWarning>
-      <body>
+      {/* 浏览器扩展可能在 React 水合前向 body 注入属性；仅抑制这一层的属性差异告警。 */}
+      <body suppressHydrationWarning>
         <AntdRegistry>{children}</AntdRegistry>
       </body>
     </html>

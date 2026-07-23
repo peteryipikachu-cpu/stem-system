@@ -1,0 +1,13 @@
+.DS_Store
+
+# 本地凭据：示例配置文件仍可提交。
+**/.env
+!**/.env.example
+
+# 本地依赖与构建缓存。
+**/node_modules/
+**/.next/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/

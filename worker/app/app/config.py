@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     worker_id: str = "worker-1"
     worker_concurrency: int = 12
+    worker_heartbeat_ttl_seconds: int = 15
     # 单次深度推理可持续 30–50 分钟；租约必须覆盖模型读取超时，避免调用尚未结束就被重复领取。
     lease_seconds: int = 3_900
     poll_interval_ms: int = 500

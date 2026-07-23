@@ -100,6 +100,7 @@ class CheckRun(Timestamped, Base):
     __table_args__ = (UniqueConstraint("idempotency_key", name="uq_check_run_idempotency"),)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     question_id: Mapped[int] = mapped_column(ForeignKey("questions.id", ondelete="CASCADE"), index=True)
+    requested_by_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(ForeignKey("check_batches.id", ondelete="SET NULL"), nullable=True)
     check_types: Mapped[list] = mapped_column(JSONB, default=list)
     priority: Mapped[str] = mapped_column(String, default="interactive", index=True)
