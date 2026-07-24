@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import uuid
 
-from app.main import queue_run_diagnosis
+from app.main import queue_run_diagnosis, run_progress_view
 from app.models import CheckWorkItem
 
 
@@ -49,6 +49,39 @@ def test_retry_backoff_is_normal_waiting() -> None:
 
     assert diagnosis["health"] == "normal"
     assert diagnosis["label"] == "重试等待"
+
+
+def test_equivalence_waiting_for_solves_has_a_specific_explanation() -> None:
+    run_id = uuid.uuid4()
+    works = [
+        work(status="running", check_type="difficulty", stage="solve", run_id=run_id),
+        work(status="running", check_type="difficulty", stage="solve", run_id=run_id),
+        work(status="blocked", check_type="difficulty", stage="equivalence", run_id=run_id),
+    ]
+
+    diagnosis = queue_run_diagnosis(works, NOW, True, 900)
+
+    assert diagnosis == {
+        "health": "normal",
+        "label": "等待独立作答",
+        "reason": "等待 2 次独立作答完成后进行结果判断",
+    }
+
+
+def test_run_progress_returns_completed_answers_before_final_judgement() -> None:
+    run_id = uuid.uuid4()
+    works = [
+        work(status="completed", check_type="difficulty", stage="solve", run_id=run_id, attempt=1, result={"answer": "A"}),
+        work(status="completed", check_type="difficulty", stage="solve", run_id=run_id, attempt=2, result={"answer": "B"}),
+        work(status="running", check_type="difficulty", stage="solve", run_id=run_id, attempt=3),
+        work(status="blocked", check_type="difficulty", stage="equivalence", run_id=run_id),
+    ]
+
+    assert run_progress_view(works) == [{
+        "checkType": "difficulty", "total": 4, "completed": 2, "running": 1, "queued": 0, "blocked": 1,
+        "solveTotal": 3, "solveCompleted": 2, "solveRunning": 1, "waitingForResult": True,
+        "completedAnswers": [{"attempt": 1, "answer": "A"}, {"attempt": 2, "answer": "B"}],
+    }]
 
 
 def test_ready_dependency_left_blocked_is_stuck() -> None:

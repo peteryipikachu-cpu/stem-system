@@ -5,6 +5,20 @@ export interface CheckRunAccepted {
   status: string;
 }
 
+export interface ActiveCheckProgress {
+  checkType: string;
+  total: number;
+  completed: number;
+  running: number;
+  queued: number;
+  blocked: number;
+  solveTotal: number;
+  solveCompleted: number;
+  solveRunning: number;
+  waitingForResult: boolean;
+  completedAnswers: Array<{ attempt: number; answer: string }>;
+}
+
 export interface BatchAccepted {
   batchId: string;
   runIds: string[];
@@ -54,6 +68,7 @@ export interface CheckRunStatus {
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
+  progress: ActiveCheckProgress[];
 }
 
 function idempotencyKey() {

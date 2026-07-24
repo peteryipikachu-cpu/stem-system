@@ -187,6 +187,12 @@ def run_audit_model(run: CheckRun) -> AuditModel:
     return model_from_snapshot(run.model_versions)
 
 
+def overlapping_check_types(run: CheckRun, check_types: list[str]) -> list[str]:
+    """Return requested check types that an active run is already responsible for."""
+    active_types = set(run.check_types or [])
+    return [check_type for check_type in check_types if check_type in active_types]
+
+
 def make_work(run: CheckRun, check_type: str, stage: str, attempt: int, provider: str,
               status: str = "queued", queue_owner_id: int = 0) -> CheckWorkItem:
     # 同一 CheckRun 内保持幂等；人工重检必须能创建新的工作项，不能与历史失败记录冲突。
@@ -252,11 +258,29 @@ async def create_run(session: AsyncSession, redis: Redis, question_id: int, chec
     question = await session.get(Question, question_id, with_for_update=True)
     if not question:
         raise LookupError("question not found")
-    active = await session.scalar(select(CheckRun).where(CheckRun.question_id == question_id,
-        CheckRun.status.in_(["queued", "running", "cancelling"])).limit(1))
-    if active:
-        if run_audit_model(active).id != model.id:
-            raise ActiveModelConflictError("该题已有使用其他模型的进行中质检，请等待完成或取消后再切换模型")
+    active_runs = (await session.scalars(
+        select(CheckRun).where(
+            CheckRun.question_id == question_id,
+            CheckRun.status.in_(["queued", "running", "cancelling"]),
+        )
+    )).all()
+    conflicting_types: list[str] = []
+    same_model_runs: list[CheckRun] = []
+    for active in active_runs:
+        overlap = overlapping_check_types(active, types)
+        if run_audit_model(active).id == model.id:
+            same_model_runs.append(active)
+        elif overlap:
+            conflicting_types.extend(overlap)
+    if conflicting_types:
+        labels = {"latex": "LaTeX 格式", "difficulty": "难度校验", "answer": "答案校验", "synthesis": "AI 合成题检测"}
+        names = "、".join(labels.get(check_type, check_type) for check_type in dict.fromkeys(conflicting_types))
+        raise ActiveModelConflictError(f"该题的{names}已有使用其他模型的进行中质检，请等待完成或取消后再切换模型")
+
+    # 同模型沿用既有“补充未运行检查项”的行为；不同模型但检查项不重叠时，
+    # 创建独立 CheckRun，以便答案、难度等可以并行使用不同模型。
+    if same_model_runs:
+        active = next((run for run in same_model_runs if overlapping_check_types(run, types)), same_model_runs[0])
         current_types = list(active.check_types or [])
         added_types = [check_type for check_type in types if check_type not in current_types]
         if added_types:
@@ -361,7 +385,15 @@ async def call_chat(client: httpx.AsyncClient, base_url: str, api_key: Optional[
 
 
 def solve_prompt(question: str) -> str:
-    return f"你是一位严谨的 STEM 竞赛题解题专家。请独立解答以下题目，给出最终答案和关键推导。\\n\\n题目：\\n{question}"
+    return f"""你是一位严谨的 STEM 竞赛题解题专家。请独立求解以下题目，并只给出可用于答案比对的最终答案。
+
+输出规则（必须严格遵守）：
+1. 只输出答案本身，不要添加“最终答案：”、答案标签、推导、思考过程、解释、Markdown 标题或其他文字。
+2. 所有数学公式必须完整地使用 `$...$`（行内）或 `$$...$$`（独立成行）包裹；不得输出裸 LaTeX 命令。
+3. 若题干要求唯一对应关系、唯一选项或唯一结论，必须只输出一组确定答案；禁止输出“或 / 或者 / 任选 / 可能”等备选答案，也不得把对称或等价变换当作额外答案。仅当题干明确要求全部解集时，才完整列出所有解。
+
+题目：
+{question}"""
 
 
 async def execute_model(work: CheckWorkItem, question: Question, settings: Settings) -> tuple[dict[str, Any], list[Any]]:
@@ -376,7 +408,6 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                     "messages": [{"role": "user", "content": prompt}],
                     "thinking": {"type": "disabled"},
                     "temperature": 0,
-                    "max_tokens": 128,
                 })
                 flags = [line.upper().find("YES") >= 0 for line in content.splitlines() if line.strip()]
                 flags = (flags + [False] * len(answers))[:len(answers)]
@@ -393,17 +424,21 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
 
 只输出 JSON：
 {{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}"""
-                content, raw = await call_chat(client, settings.doubao_base_url, settings.doubao_api_key, {"model": settings.doubao_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800})
+                content, raw = await call_chat(client, settings.doubao_base_url, settings.doubao_api_key, {"model": settings.doubao_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0})
                 return {"answer": content[:10000]}, [raw]
             # 后台任务只在完成后持久化结果，使用完整响应可避免中转服务的流式连接中断。
-            content, raw = await call_chat(client, settings.doubao_base_url, settings.doubao_api_key, {"model": settings.doubao_model, "messages": [{"role": "user", "content": solve_prompt(question.question)}], "temperature": 0, "max_tokens": 1_200})
+            content, raw = await call_chat(client, settings.doubao_base_url, settings.doubao_api_key, {"model": settings.doubao_model, "messages": [{"role": "user", "content": solve_prompt(question.question)}], "temperature": 0})
             return {"answer": content[:10000]}, [raw]
         if work.provider == "gemini":
             if work.stage == "synthesis":
                 prompt = f"""判断下列题目是否疑似由生成式 AI 生成。只分析 AI 生成痕迹，不能用题目难度、专业性、正确性或标准公式作为证据；证据不足时判定 false。只输出 JSON：{{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}\n题目：{question.question}\n参考答案：{question.answer}"""
             else:
                 prompt = solve_prompt(question.question)
-            content, raw = await call_chat(client, settings.gemini_base_url, settings.gemini_api_key, {"model": settings.gemini_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800 if work.stage == "synthesis" else 1_200})
+            request_body: dict[str, Any] = {"model": settings.gemini_model, "messages": [{"role": "user", "content": prompt}], "temperature": 0}
+            if work.stage == "solve":
+                request_body["thinking"] = {"type": "enabled"}
+                request_body["reasoning"] = {"effort": "high"}
+            content, raw = await call_chat(client, settings.gemini_base_url, settings.gemini_api_key, request_body)
             return {"answer": content[:10000]}, [raw]
         raise ValueError(f"unsupported provider: {work.provider}")
 
@@ -449,7 +484,13 @@ async def complete_run_if_ready(session: AsyncSession, redis: Redis, run: CheckR
     ).limit(1))
     run.status = "manual_review" if manual else "completed"; run.completed_at = utcnow()
     question = await session.get(Question, run.question_id)
-    if question: question.status = "manual_review" if manual else "done"
+    if question:
+        other_active_run = await session.scalar(select(CheckRun.id).where(
+            CheckRun.question_id == run.question_id,
+            CheckRun.id != run.id,
+            CheckRun.status.in_(["queued", "running", "cancelling"]),
+        ).limit(1))
+        question.status = "checking" if other_active_run else ("manual_review" if manual else "done")
     if run.batch_id:
         batch = await session.get(CheckBatch, run.batch_id, with_for_update=True)
         if batch:

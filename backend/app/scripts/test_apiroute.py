@@ -32,7 +32,6 @@ def main() -> int:
             {"role": "user", "content": "Reply exactly: APIRoute stream compatible."},
         ],
         "temperature": 0,
-        "max_tokens": 32,
     }
     if stream:
         payload["stream"] = True

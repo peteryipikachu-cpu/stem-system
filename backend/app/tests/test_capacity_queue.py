@@ -1,10 +1,14 @@
 import uuid
+from types import SimpleNamespace
 
 import httpx
+import pytest
 
+import app.main as main
 from app.config import Settings
 from app.models import CheckRun
 from app.queue import provider_limit
+from app.schemas import CheckRequest
 from app.services import make_check_work_items, provider_error
 
 
@@ -60,3 +64,34 @@ def test_missing_provider_key_is_not_retryable() -> None:
     assert code == "provider_not_configured"
     assert status is None
     assert retryable is False
+
+
+@pytest.mark.asyncio
+async def test_start_check_does_not_require_backend_provider_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The API only validates the model ID; the Worker owns provider credentials."""
+    created: dict[str, object] = {}
+
+    async def visible_question(*_: object, **__: object) -> object:
+        return SimpleNamespace(id=42)
+
+    async def create_check_run(*_: object, **kwargs: object) -> object:
+        created.update(kwargs)
+        return SimpleNamespace(id=uuid.uuid4(), status="queued")
+
+    class Session:
+        async def commit(self) -> None:
+            return None
+
+    monkeypatch.setattr(main, "get_visible_question", visible_question)
+    monkeypatch.setattr(main, "create_run", create_check_run)
+
+    response = await main.start_check(
+        42,
+        CheckRequest(checkTypes=["answer"], model="doubao-seed-2-1-pro-260628"),
+        current_user=SimpleNamespace(id=7),
+        idempotency_key="test-without-backend-key",
+        session=Session(),
+    )
+
+    assert response["status"] == "queued"
+    assert created["model_id"] == "doubao-seed-2-1-pro-260628"

@@ -13,14 +13,16 @@ class Settings(BaseSettings):
     worker_id: str = "worker-1"
     worker_concurrency: int = 12
     worker_heartbeat_ttl_seconds: int = 15
-    # 单次深度推理可持续 30–50 分钟；租约必须覆盖模型读取超时，避免调用尚未结束就被重复领取。
+    # 豆包深度思考可能持续数十分钟；租约必须覆盖最长的供应商读取超时。
     lease_seconds: int = 3_900
     poll_interval_ms: int = 500
     ai_queue_max_wait_ms: int = 900_000
-    # 上游深度推理允许最长一小时无响应。可按供应商 SLA 通过环境变量覆盖。
-    ai_model_read_timeout_seconds: int = 3_600
+    # 通用供应商（例如 Gemini）的读取超时。
+    ai_model_read_timeout_seconds: int = 600
+    # 豆包深度思考专用读取超时。APIRoute 在模型完成前不一定返回首个响应字节。
+    ai_doubao_read_timeout_seconds: int = 3_600
     # Number of retries after the initial provider request.
-    ai_retry_max_attempts: int = 3
+    ai_retry_max_attempts: int = 1
     ai_limit_rule_concurrency: int = 4
     ai_limit_doubao_concurrency: int = 3
     ai_limit_doubao_deep_concurrency: int = 2

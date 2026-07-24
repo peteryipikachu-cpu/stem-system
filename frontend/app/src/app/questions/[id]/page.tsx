@@ -1,6 +1,6 @@
 "use client";
 // @refresh reset
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Layout,
   Breadcrumb,
@@ -38,7 +38,7 @@ import useSWR from "swr";
 import LatexRenderer from "@/components/LatexRenderer";
 import ModelSelectionModal from "@/components/ModelSelectionModal";
 import { CHECK_TYPE_LABELS, CheckType } from "@/types";
-import { getCheckRun, startCheck, subscribeCheckRun, type CheckRunEvent } from "@/lib/check-runs";
+import { getCheckRun, startCheck, subscribeCheckRun, type ActiveCheckProgress, type CheckRunEvent } from "@/lib/check-runs";
 import { auditModelLabel, DEFAULT_AUDIT_MODEL_ID, type AuditModelId } from "@/lib/audit-models";
 
 const { Header, Content } = Layout;
@@ -108,7 +108,8 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
   const modelLabel = auditModelLabel(detail.model as { label?: unknown; id?: unknown });
 
   const renderDetail = () => {
-    if (cr.result === "manual_review") {
+    const partial = Boolean(detail.partial);
+    if (cr.result === "manual_review" && !partial) {
       return <Alert type="warning" title="已转人工复核" description={String(detail.message || "模型调用未完成，请由人工处理该审核项。")} />;
     }
     if (detail.error) {
@@ -137,11 +138,13 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
       const total = Number(detail.totalCount ?? 8);
       const threshold = Number(detail.threshold ?? 6);
       const responses = (detail.responses || []) as string[];
+      const responseAttempts = (detail.responseAttempts || []) as number[];
       const equivalences = (detail.equivalences || []) as boolean[];
       return (
         <Space orientation="vertical" style={{ width: "100%" }}>
           <Text>{modelLabel} 答对次数：<Text strong style={{ color: correct <= threshold ? "#52c41a" : "#ff4d4f" }}>{correct}/{total}</Text>（阈值 ≤{threshold}次）</Text>
           <Text type="secondary">答对 ≤{threshold} 次说明难度足够，答对 &gt;{threshold} 次说明难度不足</Text>
+          {partial && <Alert type="warning" title={`已保留 ${Number(detail.completedCount ?? responses.length)}/${total} 次成功作答`} description={String(detail.message || "其余独立作答请求未完成，当前结果需人工复核；成功答案仍可查看。")} />}
           {responses.length > 0 && (
             <div style={{ marginTop: 4 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>每次答题结果：</Text>
@@ -152,7 +155,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
                   const isCorrect = equivalences[i] === true;
                   const bgColor = isError ? "#fff1f0" : isCorrect ? "#f6ffed" : "#fafafa";
                   const borderColor = isError ? "#ffa39e" : isCorrect ? "#b7eb8f" : "#d9d9d9";
-                  const label = isError ? "调用失败" : "第" + (i + 1) + "次";
+                  const label = isError ? "调用失败" : "第" + (responseAttempts[i] ?? i + 1) + "次";
                   return (
                     <div key={i} style={{ background: bgColor, border: `1px solid ${borderColor}`, borderRadius: 6, padding: "6px 10px", fontSize: 12 }}>
                       <Space align="center" size={4}>
@@ -177,11 +180,13 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
       const correct = Number(detail.correctCount ?? 0);
       const total = Number(detail.totalCount ?? 4);
       const responses = (detail.responses || []) as string[];
+      const responseAttempts = (detail.responseAttempts || []) as number[];
       const equivalences = (detail.equivalences || []) as boolean[];
       return (
         <Space orientation="vertical" style={{ width: "100%" }}>
           <Text>{modelLabel} 答对次数：<Text strong style={{ color: correct >= 1 ? "#52c41a" : "#ff4d4f" }}>{correct}/{total}</Text></Text>
           <Text type="secondary">≥1 次答对说明答案可信</Text>
+          {partial && <Alert type="warning" title={`已保留 ${Number(detail.completedCount ?? responses.length)}/${total} 次成功作答`} description={String(detail.message || "其余独立作答请求未完成，当前结果需人工复核；成功答案仍可查看。")} />}
           {responses.length > 0 && (
             <div style={{ marginTop: 4 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>每次答题结果：</Text>
@@ -191,7 +196,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
                   const isCorrect = equivalences[i] === true;
                   const bgColor = isError ? "#fff1f0" : isCorrect ? "#f6ffed" : "#fafafa";
                   const borderColor = isError ? "#ffa39e" : isCorrect ? "#b7eb8f" : "#d9d9d9";
-                  const label = isError ? "调用失败" : "第" + (i + 1) + "次";
+                  const label = isError ? "调用失败" : "第" + (responseAttempts[i] ?? i + 1) + "次";
                   return (
                     <div key={i} style={{ background: bgColor, border: `1px solid ${borderColor}`, borderRadius: 6, padding: "6px 10px", fontSize: 12 }}>
                       <Space align="center" size={4}>
@@ -286,6 +291,47 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
   );
 }
 
+function ActiveCheckProgressCard({ progress }: { progress: ActiveCheckProgress[] }) {
+  const visibleProgress = progress.filter((item) => item.total > 0);
+  if (visibleProgress.length === 0) return null;
+  return (
+    <Card size="small" title="本次质检进度" style={{ marginBottom: 12 }} styles={{ body: { padding: "12px 16px" } }}>
+      <Space orientation="vertical" size={12} style={{ width: "100%" }}>
+        {visibleProgress.map((item) => {
+          const label = CHECK_TYPE_LABELS[item.checkType as CheckType] || item.checkType;
+          const solveSummary = item.solveTotal > 0
+            ? `已完成 ${item.solveCompleted}/${item.solveTotal} 次独立作答`
+            : `已完成 ${item.completed}/${item.total}`;
+          return (
+            <div key={item.checkType}>
+              <Space wrap size={6}>
+                <Text strong>{label}</Text>
+                <Tag color="processing">{solveSummary}</Tag>
+                {item.solveRunning > 0 && <Tag>执行中 {item.solveRunning}</Tag>}
+                {item.queued > 0 && <Tag>排队中 {item.queued}</Tag>}
+                {item.waitingForResult && <Tag color="default">等待结果判断</Tag>}
+              </Space>
+              {item.completedAnswers.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <Text type="secondary" style={{ fontSize: 12 }}>已完成作答：</Text>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+                    {item.completedAnswers.map((answer) => (
+                      <div key={answer.attempt} style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, padding: "6px 10px", fontSize: 12 }}>
+                        <Text strong style={{ fontSize: 12 }}>第{answer.attempt}次</Text>
+                        <div style={{ marginTop: 2 }}><LatexRenderer content={finalAnswerOnly(answer.answer)} /></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </Space>
+    </Card>
+  );
+}
+
 interface Question {
   id: number;
   title: string;
@@ -309,7 +355,14 @@ interface Question {
     id: string;
     checkTypes: string[];
     status: string;
+    progress?: ActiveCheckProgress[];
   };
+  activeCheckRuns?: Array<{
+    id: string;
+    checkTypes: string[];
+    status: string;
+    progress?: ActiveCheckProgress[];
+  }>;
 }
 
 interface EditQuestionValues {
@@ -336,6 +389,7 @@ export default function QuestionDetailPage() {
   const isHistorical = historicalVersion !== null;
   const [checkingTypes, setCheckingTypes] = useState<Set<string>>(new Set());
   const [checkProgress, setCheckProgress] = useState<Record<string, string>>({});
+  const [activeRunProgress, setActiveRunProgress] = useState<Record<string, ActiveCheckProgress[]>>({});
   const [checkDurations] = useState<Record<string, number>>({}); // 耗时 ms
   const [editing, setEditing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -358,9 +412,13 @@ export default function QuestionDetailPage() {
     fetcher
   );
   const { data: currentUser, error: authError } = useSWR<{ username: string; role: "user" | "admin" }>("/api/auth/me", fetcher);
-  const activeRun = isHistorical ? undefined : question?.activeCheckRun;
-  const activeRunId = activeRun?.id;
-  const activeRunTypesKey = activeRun?.checkTypes.join(",") || "";
+  const activeRuns = useMemo(() => (
+    isHistorical
+      ? []
+      : question?.activeCheckRuns?.length
+        ? question.activeCheckRuns
+        : question?.activeCheckRun ? [question.activeCheckRun] : []
+  ), [isHistorical, question]);
 
   useEffect(() => {
     if (!question || isHistorical) return;
@@ -392,7 +450,16 @@ export default function QuestionDetailPage() {
       finished = true;
       close();
       window.clearInterval(pollTimer);
-      setCheckingTypes(new Set());
+      setCheckingTypes((previous) => {
+        const next = new Set(previous);
+        requestedTypes.forEach((type) => next.delete(type));
+        return next;
+      });
+      setActiveRunProgress((previous) => {
+        const remaining = { ...previous };
+        delete remaining[runId];
+        return remaining;
+      });
       mutate();
       if (status === "completed") message.success("质检完成");
       else if (status === "manual_review") message.warning("质检已转人工复核，请查看失败原因");
@@ -410,6 +477,7 @@ export default function QuestionDetailPage() {
           return;
         }
         const progress = run.status === "queued" ? "排队中" : "检测中";
+        setActiveRunProgress((previous) => ({ ...previous, [runId]: run.progress || [] }));
         if (!initialized) {
           initialized = true;
           const types = run.checkTypes.length ? run.checkTypes : requestedTypes;
@@ -488,9 +556,9 @@ export default function QuestionDetailPage() {
   }, [mutate]);
 
   useEffect(() => {
-    if (!activeRunId) return;
-    return monitorRun(activeRunId, activeRunTypesKey ? activeRunTypesKey.split(",") : []);
-  }, [activeRunId, activeRunTypesKey, monitorRun]);
+    const stops = activeRuns.map((run) => monitorRun(run.id, run.checkTypes));
+    return () => stops.forEach((stop) => stop());
+  }, [activeRuns, monitorRun]);
 
   useEffect(() => {
     if (authError) router.replace("/login");
@@ -609,9 +677,10 @@ export default function QuestionDetailPage() {
 
   // 页面刷新时本地状态为空；直接由持久化的活动任务派生状态，直到 SSE 回放接管。
   const recoveredCheckingTypes = checkingTypes.size === 0 && Object.keys(checkProgress).length === 0
-    ? new Set(activeRun?.checkTypes || [])
+    ? new Set(activeRuns.flatMap((run) => run.checkTypes))
     : checkingTypes;
-  const recoveredProgress = activeRun?.status === "queued" ? "排队中" : "检测中";
+  const recoveredProgress = activeRuns.some((run) => run.status === "running") ? "检测中" : "排队中";
+  const currentRunProgress = activeRuns.flatMap((run) => activeRunProgress[run.id] || run.progress || []);
   const activeProgress = Array.from(recoveredCheckingTypes).map((type) => {
     const label = CHECK_TYPE_LABELS[type as CheckType] || type;
     return `${label}：${checkProgress[type] || recoveredProgress}`;
@@ -781,6 +850,9 @@ export default function QuestionDetailPage() {
                   title={`正在质检：${activeProgress.join(" · ") || recoveredProgress}`}
                   style={{ marginBottom: 12 }}
                 />
+              )}
+              {!isHistorical && currentRunProgress.length > 0 && (
+                <ActiveCheckProgressCard progress={currentRunProgress} />
               )}
               {!isHistorical && checkingTypes.size === 0 && checkDurations["__total"] && (
                 <div style={{ marginBottom: 12, padding: "6px 12px", background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, fontSize: 12 }}>

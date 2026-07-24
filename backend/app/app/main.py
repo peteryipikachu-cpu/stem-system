@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 
 from .config import get_settings
-from .audit_models import ensure_audit_model_available, get_audit_model
+from .audit_models import get_audit_model
 from .auth import SESSION_COOKIE, create_session_token, ensure_initial_admin, get_current_user, hash_password, require_admin, user_view, verify_password
 from .db import SessionLocal, engine, get_session
 from .models import Base, CheckBatch, CheckEvent, CheckRun, CheckWorkItem, Question, QuestionVersion, User
@@ -132,6 +132,7 @@ def _queue_user_view(user: Optional[User]) -> Optional[dict[str, Any]]:
 
 
 def _work_item_view(work: CheckWorkItem) -> dict[str, Any]:
+    answer = (work.result or {}).get("answer") if isinstance(work.result, dict) else None
     return {
         "id": str(work.id), "checkType": work.check_type, "stage": work.stage,
         "provider": work.provider, "status": work.status, "attemptNo": work.attempt_no,
@@ -140,6 +141,7 @@ def _work_item_view(work: CheckWorkItem) -> dict[str, Any]:
         "completedAt": _iso(work.completed_at), "leaseOwner": work.lease_owner,
         "leaseExpiresAt": _iso(work.lease_expires_at), "error": work.error,
         "errorCode": work.error_code, "errorStatusCode": work.error_status_code,
+        "resultPreview": str(answer)[:500] if answer else None,
     }
 
 
@@ -186,8 +188,19 @@ def queue_run_diagnosis(run_works: list[CheckWorkItem], now: datetime, worker_on
         return {"health": "attention", "label": "排队时间过长", "reason": f"可执行任务等待已超过 {queue_wait_seconds // 60} 分钟"}
     if any(item.status == "queued" and item.available_at > now for item in active):
         return {"health": "normal", "label": "重试等待", "reason": "任务处于退避期，尚未到可执行时间"}
+    blocked_equivalence = [item for item in active if item.status == "blocked" and item.stage == "equivalence"]
+    if blocked_equivalence:
+        solve_count = sum(
+            1 for item in run_works
+            if item.check_type == blocked_equivalence[0].check_type and item.stage == "solve"
+        )
+        return {
+            "health": "normal",
+            "label": "等待独立作答",
+            "reason": f"等待 {solve_count} 次独立作答完成后进行结果判断",
+        }
     if any(item.status == "blocked" for item in active):
-        return {"health": "normal", "label": "等待前置检查", "reason": "前置检查尚未完成"}
+        return {"health": "normal", "label": "等待 LaTeX 格式检查", "reason": "LaTeX 格式检查尚未完成"}
     if any(item.status == "running" for item in active):
         return {"health": "normal", "label": "执行中", "reason": "Worker 正在处理模型调用"}
     return {"health": "normal", "label": "等待调度", "reason": "任务已进入待调度队列"}
@@ -434,14 +447,16 @@ async def get_question_version(question_id: int, version_number: int, current_us
 async def get_question(question_id: int, current_user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     question = await get_visible_question(session, question_id, current_user, with_results=True)
     data = question_json(question)
-    active_run = await session.scalar(
+    active_runs = (await session.scalars(
         select(CheckRun)
         .where(CheckRun.question_id == question_id, CheckRun.status.in_(["queued", "running", "cancelling"]))
         .order_by(CheckRun.created_at.desc())
-        .limit(1)
-    )
-    if active_run:
-        data["activeCheckRun"] = run_view(active_run)
+    )).all()
+    if active_runs:
+        active_views = [await run_view(session, run) for run in active_runs]
+        data["activeCheckRuns"] = active_views
+        # 保留旧字段，兼容尚未更新的客户端。
+        data["activeCheckRun"] = active_views[0]
     return data
 
 
@@ -458,8 +473,6 @@ async def start_check(question_id: int, payload: CheckRequest, current_user: Use
     key = idempotency_key or f"interactive:{question_id}:{uuid.uuid4()}"
     try:
         model = get_audit_model(payload.model)
-        if any(check_type != "latex" for check_type in payload.checkTypes):
-            model = ensure_audit_model_available(settings, model.id)
         run = await create_run(session, redis, question_id, payload.checkTypes, key, model_id=model.id,
                                requested_by_user_id=current_user.id)
         await session.commit()
@@ -478,16 +491,19 @@ async def start_batch(payload: BatchCheckRequest, current_user: User = Depends(g
         await get_visible_question(session, question_id, current_user)
     try:
         model = get_audit_model(payload.model)
-        if any(check_type != "latex" for check_type in payload.checkTypes):
-            model = ensure_audit_model_available(settings, model.id)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     active_runs = (await session.scalars(select(CheckRun).where(
         CheckRun.question_id.in_(payload.questionIds),
         CheckRun.status.in_(["queued", "running", "cancelling"]),
     ))).all()
-    if any(get_audit_model((run.model_versions or {}).get("id")).id != model.id for run in active_runs):
-        raise HTTPException(409, "存在使用其他模型的进行中质检，请等待完成或取消后再切换模型")
+    conflicting_runs = [
+        run for run in active_runs
+        if get_audit_model((run.model_versions or {}).get("id")).id != model.id
+        and set(run.check_types or []).intersection(payload.checkTypes)
+    ]
+    if conflicting_runs:
+        raise HTTPException(409, "存在与本次检查项重叠、且使用其他模型的进行中质检，请等待完成或取消后再切换模型")
     deadline = payload.deadlineAt or default_batch_deadline()
     if deadline.tzinfo is None:
         deadline = deadline.replace(tzinfo=timezone.utc)
@@ -512,18 +528,50 @@ async def start_batch(payload: BatchCheckRequest, current_user: User = Depends(g
     return {"batchId": batch.id, "runIds": [item.id for item in runs], "status": batch.status, "deadlineAt": batch.deadline_at}
 
 
-def run_view(run: CheckRun) -> dict[str, Any]:
+def run_progress_view(works: list[CheckWorkItem]) -> list[dict[str, Any]]:
+    """Summarize active work without waiting for the final equivalence stage."""
+    by_type: dict[str, list[CheckWorkItem]] = {}
+    for work in works:
+        by_type.setdefault(work.check_type, []).append(work)
+    progress: list[dict[str, Any]] = []
+    for check_type, type_works in by_type.items():
+        solves = sorted((work for work in type_works if work.stage == "solve"), key=lambda work: work.attempt)
+        completed_answers = [
+            {"attempt": work.attempt, "answer": str((work.result or {}).get("answer", ""))[:4_000]}
+            for work in solves if work.status == "completed" and (work.result or {}).get("answer")
+        ]
+        progress.append({
+            "checkType": check_type,
+            "total": len(type_works),
+            "completed": sum(work.status == "completed" for work in type_works),
+            "running": sum(work.status == "running" for work in type_works),
+            "queued": sum(work.status == "queued" for work in type_works),
+            "blocked": sum(work.status == "blocked" for work in type_works),
+            "solveTotal": len(solves),
+            "solveCompleted": sum(work.status == "completed" for work in solves),
+            "solveRunning": sum(work.status == "running" for work in solves),
+            "waitingForResult": any(work.stage == "equivalence" and work.status == "blocked" for work in type_works),
+            "completedAnswers": completed_answers,
+        })
+    return progress
+
+
+async def run_view(session: AsyncSession, run: CheckRun) -> dict[str, Any]:
+    works = (await session.scalars(
+        select(CheckWorkItem).where(CheckWorkItem.run_id == run.id).order_by(CheckWorkItem.check_type, CheckWorkItem.attempt)
+    )).all()
     return {"id": str(run.id), "questionId": run.question_id, "batchId": str(run.batch_id) if run.batch_id else None,
         "checkTypes": run.check_types, "priority": run.priority, "status": run.status,
         "model": run.model_versions or get_audit_model().snapshot(),
         "createdAt": run.created_at.isoformat(), "startedAt": run.started_at.isoformat() if run.started_at else None,
-        "completedAt": run.completed_at.isoformat() if run.completed_at else None}
+        "completedAt": run.completed_at.isoformat() if run.completed_at else None,
+        "progress": run_progress_view(works)}
 
 
 @app.get("/api/check-runs/{run_id}")
 async def get_run(run_id: uuid.UUID, current_user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     run = await get_visible_run(session, run_id, current_user)
-    return run_view(run)
+    return await run_view(session, run)
 
 
 @app.get("/api/check-batches/{batch_id}")

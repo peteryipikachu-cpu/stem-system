@@ -302,6 +302,23 @@ async def activate_equivalence_if_ready(session: AsyncSession, redis: Redis, run
     work = await session.scalar(select(CheckWorkItem).where(CheckWorkItem.run_id == run_id,
         CheckWorkItem.check_type == check_type, CheckWorkItem.stage == "equivalence", CheckWorkItem.status == "blocked"))
     if work:
+        completed_answer = await session.scalar(select(CheckWorkItem.id).where(
+            CheckWorkItem.run_id == run_id,
+            CheckWorkItem.check_type == check_type,
+            CheckWorkItem.stage == "solve",
+            CheckWorkItem.status == "completed",
+            CheckWorkItem.result.is_not(None),
+        ).limit(1))
+        if not completed_answer:
+            await mark_manual_review(
+                session,
+                redis,
+                work,
+                error_code="no_successful_answers",
+                status_code=None,
+                message="全部独立作答均未完成，暂无可用于结果判断的模型答案",
+            )
+            return
         work.status = "queued"
         await enqueue(redis, work)
 
@@ -325,6 +342,70 @@ async def recover_ready_dependencies(session: AsyncSession, redis: Redis) -> int
             await enqueue(redis, work)
             activated += 1
     return activated
+
+
+async def recover_partial_timeout_finalizations(session: AsyncSession, redis: Redis) -> int:
+    """让已有成功作答的超时任务继续完成最终判断。
+
+    旧版本在某一次独立作答超时后，会把同一检查项的全部工作项（包括
+    ``equivalence``）一并转人工复核，已得到的答案因此无法展示或参与判断。
+    这里只恢复“有成功答案 + 其余仅因可重试超时失败”的最新任务，并且每个
+    工作项只补做一次最终判断，避免恢复循环造成额外模型调用。
+    """
+    works = (await session.scalars(select(CheckWorkItem).join(
+        CheckRun, CheckRun.id == CheckWorkItem.run_id,
+    ).where(
+        CheckWorkItem.stage == "equivalence",
+        CheckWorkItem.check_type.in_(["difficulty", "answer"]),
+        CheckWorkItem.status == "manual_review",
+    ).order_by(CheckRun.created_at.desc()).with_for_update(skip_locked=True))).all()
+    restored = 0
+    seen: set[tuple[int, str]] = set()
+    timeout_codes = {"timeout", "http_502", "http_503", "http_504"}
+    for work in works:
+        key = (work.question_id, work.check_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        run = await session.get(CheckRun, work.run_id)
+        if not run:
+            continue
+        # 同一题目同一检查项仅恢复最新一次审核，不能让更早的历史任务覆盖
+        # 用户刚发起的结果。
+        newer_run = await session.scalar(select(CheckRun.id).where(
+            CheckRun.question_id == work.question_id,
+            CheckRun.created_at > run.created_at,
+        ))
+        if newer_run:
+            newer = await session.get(CheckRun, newer_run)
+            if newer and work.check_type in (newer.check_types or []):
+                continue
+        if (work.payload or {}).get("partialFinalizationAttempted"):
+            continue
+        solves = (await session.scalars(select(CheckWorkItem).where(
+            CheckWorkItem.run_id == work.run_id,
+            CheckWorkItem.check_type == work.check_type,
+            CheckWorkItem.stage == "solve",
+        ))).all()
+        completed = [item for item in solves if item.status == "completed" and (item.result or {}).get("answer")]
+        failed = [item for item in solves if item.status != "completed"]
+        if not completed or not failed or not all(item.error_code in timeout_codes for item in failed):
+            continue
+        work.status = "queued"
+        work.error = work.error_code = None
+        work.error_status_code = None
+        work.manual_review_at = work.completed_at = None
+        work.payload = {**(work.payload or {}), "partialFinalizationAttempted": True}
+        run = await session.get(CheckRun, work.run_id, with_for_update=True)
+        question = await session.get(Question, work.question_id)
+        if run:
+            run.status = "queued"
+            run.completed_at = None
+        if question:
+            question.status = "checking"
+        await enqueue(redis, work)
+        restored += 1
+    return restored
 
 
 def latex_check(text: str) -> dict[str, Any]:
@@ -366,17 +447,27 @@ async def call_chat(client: httpx.AsyncClient, base_url: str, api_key: Optional[
 
 
 def solve_prompt(question: str) -> str:
-    return f"你是一位严谨的 STEM 竞赛题解题专家。请独立解答以下题目，给出最终答案和关键推导。\\n\\n题目：\\n{question}"
+    return f"""你是一位严谨的 STEM 竞赛题解题专家。请独立求解以下题目，并只给出可用于答案比对的最终答案。
+
+输出规则（必须严格遵守）：
+1. 只输出答案本身，不要添加“最终答案：”、答案标签、推导、思考过程、解释、Markdown 标题或其他文字。
+2. 所有数学公式必须完整地使用 `$...$`（行内）或 `$$...$$`（独立成行）包裹；不得输出裸 LaTeX 命令。
+3. 每个公式的花括号、分隔符都必须配对；无法确定时用普通文本说明，不要输出不完整公式。
+4. 若题干要求唯一对应关系、唯一选项或唯一结论，必须只输出一组确定答案；禁止输出“或 / 或者 / 任选 / 可能”等备选答案，也不得把对称或等价变换当作额外答案。仅当题干明确要求全部解集时，才完整列出所有解。
+
+题目：
+{question}"""
 
 
 def difficulty_answer_prompt(question: str) -> str:
-    return f"你是一位严谨的 STEM 竞赛题解题专家。请独立求解以下题目。\\n\\n只输出最终答案本身，不得输出推导、解释、思考过程、Markdown 标题或其他文字。\\n\\n题目：\\n{question}"
+    return solve_prompt(question)
 
 
 async def execute_model(work: CheckWorkItem, question: Question, settings: Settings,
                         doubao_api_key: Optional[str] = None) -> tuple[dict[str, Any], list[Any]]:
     model = work_audit_model(work)
-    timeout = httpx.Timeout(connect=30, read=settings.ai_model_read_timeout_seconds, write=30, pool=30)
+    read_timeout = settings.ai_doubao_read_timeout_seconds if work.provider == "doubao" else settings.ai_model_read_timeout_seconds
+    timeout = httpx.Timeout(connect=30, read=read_timeout, write=30, pool=30)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if work.provider == "doubao":
             api_key = doubao_api_key or settings.doubao_api_key
@@ -388,7 +479,6 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                     "messages": [{"role": "user", "content": prompt}],
                     "thinking": {"type": "disabled"},
                     "temperature": 0,
-                    "max_tokens": 128,
                 })
                 flags = [token == "YES" for token in re.findall(r"\\b(YES|NO)\\b", content.upper())]
                 flags = (flags + [False] * len(answers))[:len(answers)]
@@ -405,7 +495,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
 
 只输出 JSON：
 {{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}"""
-                content, raw = await call_chat(client, settings.doubao_base_url, api_key, {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800})
+                content, raw = await call_chat(client, settings.doubao_base_url, api_key, {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0})
                 return {"answer": content[:10000]}, [raw]
             # 难度校验只保留最终答案；答案比对阶段则在上方显式关闭思考。
             prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
@@ -415,7 +505,6 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 "thinking": {"type": "enabled"},
                 "reasoning": {"effort": "high"},
                 "temperature": 0,
-                "max_tokens": 1_200,
             })
             return {"answer": content[:10000]}, [raw]
         if work.provider == "gemini":
@@ -425,7 +514,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 prompt = f"参考答案：{question.answer}\\n模型答案：{answers}\\n逐项判断是否数学等价，每项单独一行，只输出 YES 或 NO。"
                 content, raw = await call_chat(client, settings.gemini_base_url, api_key, {
                     "model": model.id, "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0, "max_tokens": 128,
+                    "temperature": 0,
                 })
                 flags = [token == "YES" for token in re.findall(r"\\b(YES|NO)\\b", content.upper())]
                 flags = (flags + [False] * len(answers))[:len(answers)]
@@ -434,7 +523,17 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 prompt = f"""判断下列题目是否疑似由生成式 AI 生成。只分析 AI 生成痕迹，不能用题目难度、专业性、正确性或标准公式作为证据；证据不足时判定 false。只输出 JSON：{{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}\n题目：{question.question}\n参考答案：{question.answer}"""
             else:
                 prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
-            content, raw = await call_chat(client, settings.gemini_base_url, api_key, {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0, "max_tokens": 800 if work.stage == "synthesis" else 1_200})
+            request_body: dict[str, Any] = {
+                "model": model.id,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+            }
+            if work.stage == "solve":
+                # 仅返回最终答案，但允许 Gemini 在服务端完成推理；提示词会约束
+                # 唯一答案题不输出备选映射。
+                request_body["thinking"] = {"type": "enabled"}
+                request_body["reasoning"] = {"effort": "high"}
+            content, raw = await call_chat(client, settings.gemini_base_url, api_key, request_body)
             return {"answer": content[:10000]}, [raw]
         raise ValueError(f"unsupported provider: {work.provider}")
 
@@ -449,14 +548,23 @@ async def finalize_check(session: AsyncSession, redis: Redis, work: CheckWorkIte
         raws: list[Any] = []
     elif work.stage == "equivalence":
         solve_items = [i for i in items if i.stage == "solve"]
-        answers = [str((i.result or {}).get("answer", "")) for i in solve_items]
+        completed_solve_items = [item for item in solve_items if item.status == "completed" and (item.result or {}).get("answer")]
+        answers = [str((item.result or {}).get("answer", "")) for item in completed_solve_items]
         flags = (work.result or {}).get("equivalences", [])
         correct = sum(1 for value in flags if value)
-        result = "pass" if (correct <= model.difficulty_threshold if work.check_type == "difficulty" else correct >= 1) else "fail"
+        partial = len(completed_solve_items) != len(solve_items)
+        result = "manual_review" if partial else ("pass" if (correct <= model.difficulty_threshold if work.check_type == "difficulty" else correct >= 1) else "fail")
         detail = {"model": model.snapshot(), "correctCount": correct, "totalCount": len(solve_items),
+                  "completedCount": len(completed_solve_items), "partial": partial,
                   "threshold": model.difficulty_threshold if work.check_type == "difficulty" else None,
-                  "responses": [value[:200] for value in answers], "equivalences": flags}
-        raws = [item.result for item in solve_items] + [work.result]
+                  "responses": [value[:200] for value in answers],
+                  "responseAttempts": [item.attempt for item in completed_solve_items],
+                  "equivalences": flags,
+                  "failedAttempts": [
+                      {"attempt": item.attempt, "errorCode": item.error_code, "message": item.error}
+                      for item in solve_items if item.status != "completed"
+                  ]}
+        raws = [item.result for item in completed_solve_items] + [work.result]
     elif work.check_type == "synthesis":
         answer = str((work.result or {}).get("answer", ""))
         parsed: dict[str, Any] = {}
@@ -564,13 +672,16 @@ async def clear_provider_failures(redis: Redis, provider: str) -> None:
 
 
 async def mark_manual_review(session: AsyncSession, redis: Redis, work: CheckWorkItem,
-                             *, error_code: str, status_code: Optional[int], message: str) -> None:
+                             *, error_code: str, status_code: Optional[int], message: str,
+                             cascade_check_type: bool = True) -> None:
     now = utcnow()
-    affected = (await session.scalars(select(CheckWorkItem).where(
-        CheckWorkItem.run_id == work.run_id,
-        CheckWorkItem.check_type == work.check_type,
-        CheckWorkItem.status.in_(["queued", "blocked"]),
-    ).with_for_update())).all()
+    affected: list[CheckWorkItem] = []
+    if cascade_check_type:
+        affected = (await session.scalars(select(CheckWorkItem).where(
+            CheckWorkItem.run_id == work.run_id,
+            CheckWorkItem.check_type == work.check_type,
+            CheckWorkItem.status.in_(["queued", "blocked"]),
+        ).with_for_update())).all()
     for item in affected:
         item.status = "manual_review"
         item.manual_review_at = now
@@ -587,7 +698,7 @@ async def mark_manual_review(session: AsyncSession, redis: Redis, work: CheckWor
     work.lease_owner = None
     work.lease_expires_at = None
 
-    detail = {
+    detail: dict[str, Any] = {
         "manualReview": True,
         "provider": work.provider,
         "stage": work.stage,
@@ -596,15 +707,40 @@ async def mark_manual_review(session: AsyncSession, redis: Redis, work: CheckWor
         "message": message,
         "attempts": work.attempt_no,
     }
-    result_row = await session.scalar(select(CheckResult).where(
-        CheckResult.question_id == work.question_id,
-        CheckResult.check_type == work.check_type,
-    ))
-    if result_row:
-        result_row.result, result_row.detail, result_row.raw_responses = "manual_review", detail, []
-    else:
-        session.add(CheckResult(question_id=work.question_id, check_type=work.check_type,
-                                result="manual_review", detail=detail, raw_responses=[]))
+    if work.stage == "equivalence" and work.check_type in {"difficulty", "answer"}:
+        solve_items = (await session.scalars(select(CheckWorkItem).where(
+            CheckWorkItem.run_id == work.run_id,
+            CheckWorkItem.check_type == work.check_type,
+            CheckWorkItem.stage == "solve",
+        ))).all()
+        completed_solve_items = [item for item in solve_items if item.status == "completed" and (item.result or {}).get("answer")]
+        if completed_solve_items:
+            detail.update({
+                "model": work_audit_model(work).snapshot(),
+                "partial": True,
+                "completedCount": len(completed_solve_items),
+                "totalCount": len(solve_items),
+                "threshold": work_audit_model(work).difficulty_threshold if work.check_type == "difficulty" else None,
+                "responses": [str((item.result or {}).get("answer", ""))[:200] for item in completed_solve_items],
+                "responseAttempts": [item.attempt for item in completed_solve_items],
+                "equivalences": [],
+                "failedAttempts": [
+                    {"attempt": item.attempt, "errorCode": item.error_code, "message": item.error}
+                    for item in solve_items if item.status != "completed"
+                ],
+            })
+    # 独立作答失败时不能把同一检查项中已成功的答案一并覆盖。等价判断会在
+    # 其余作答全部终态后继续运行，并将成功答案和失败次数一起落入最终详情。
+    if cascade_check_type:
+        result_row = await session.scalar(select(CheckResult).where(
+            CheckResult.question_id == work.question_id,
+            CheckResult.check_type == work.check_type,
+        ))
+        if result_row:
+            result_row.result, result_row.detail, result_row.raw_responses = "manual_review", detail, []
+        else:
+            session.add(CheckResult(question_id=work.question_id, check_type=work.check_type,
+                                    result="manual_review", detail=detail, raw_responses=[]))
     await emit(session, redis, work.run_id, "progress", {
         "questionId": work.question_id,
         "checkType": work.check_type,
@@ -641,6 +777,29 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
         if not work or work.status != "queued":
             await session.rollback()
             return 0
+        # 配置收紧后，旧策略遗留的重试工作项不应再发起额外模型调用。
+        # 直接转人工复核，保留已完成的独立作答和最后一次上游错误供排查。
+        if work.attempt_no > settings.ai_retry_max_attempts:
+            message = (
+                f"模型调用已连续失败 {work.attempt_no} 次，超过当前允许的 "
+                f"{settings.ai_retry_max_attempts} 次重试上限"
+            )
+            await mark_manual_review(
+                session,
+                redis,
+                work,
+                error_code=work.error_code or "retry_exhausted",
+                status_code=work.error_status_code,
+                message=message,
+                cascade_check_type=work.stage != "solve",
+            )
+            if work.stage == "solve":
+                await activate_equivalence_if_ready(session, redis, work.run_id, work.check_type)
+            run = await session.get(CheckRun, work.run_id)
+            if run:
+                await complete_run_if_ready(session, redis, run)
+            await session.commit()
+            return 1
         provider, stage = work.provider, work.stage
         rate_limit_scope = provider
         estimated_tokens = 300 if provider == "rule" else max(1_000, len(str(work.payload)) // 3 + 1_000)
@@ -759,7 +918,10 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
                 await enqueue(redis, work)
             else:
                 await mark_manual_review(session, redis, work, error_code=error_code,
-                                         status_code=status_code, message=message)
+                                         status_code=status_code, message=message,
+                                         cascade_check_type=work.stage != "solve")
+                if work.stage == "solve":
+                    await activate_equivalence_if_ready(session, redis, work.run_id, work.check_type)
                 run = await session.get(CheckRun, work.run_id)
                 if run:
                     await complete_run_if_ready(session, redis, run)

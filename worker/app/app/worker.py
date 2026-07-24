@@ -7,6 +7,7 @@ from .db import SessionLocal
 from .services import (
     move_batch_cutoff_to_manual_review,
     recover_expired_leases,
+    recover_partial_timeout_finalizations,
     recover_queued_work,
     recover_ready_dependencies,
     reconcile_orphaned_runs,
@@ -35,10 +36,11 @@ async def run() -> None:
         async with SessionLocal() as session:
             recovered = await recover_expired_leases(session, redis)
             dependencies = await recover_ready_dependencies(session, redis)
+            partial_finalizations = await recover_partial_timeout_finalizations(session, redis)
             await recover_queued_work(session, redis)
             cutoff = await move_batch_cutoff_to_manual_review(session, redis, settings)
             reconciled = await reconcile_orphaned_runs(session, redis)
-            if recovered or dependencies or cutoff or reconciled:
+            if recovered or dependencies or partial_finalizations or cutoff or reconciled:
                 await session.commit()
 
     try:

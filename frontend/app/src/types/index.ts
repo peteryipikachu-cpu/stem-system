@@ -17,12 +17,18 @@ export interface DifficultyCheckDetail {
   totalCount: number;
   threshold: number;
   responses: string[];
+  completedCount?: number;
+  partial?: boolean;
+  responseAttempts?: number[];
 }
 
 export interface AnswerCheckDetail {
   correctCount: number;
   totalCount: number;
   responses: string[];
+  completedCount?: number;
+  partial?: boolean;
+  responseAttempts?: number[];
 }
 
 export interface PlagiarismCheckDetail {

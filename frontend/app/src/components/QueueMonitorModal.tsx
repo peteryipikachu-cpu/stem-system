@@ -14,6 +14,20 @@ const { Text } = Typography;
 type QueueStatus = "active" | "all" | "queued" | "running" | "blocked" | "manual_review" | "manual_review_completed" | "manual_review_archived";
 type QueueHealth = "all" | "normal" | "attention" | "stuck";
 
+const WORK_STATUS_LABELS: Record<string, string> = {
+  pending: "待处理",
+  queued: "排队中",
+  running: "执行中",
+  blocked: "等待依赖",
+  completed: "已完成",
+  failed: "失败",
+  dead: "已终止",
+  cancelled: "已取消",
+  manual_review: "待人工复核",
+  manual_review_completed: "人工复核已完成",
+  manual_review_archived: "人工复核已归档",
+};
+
 interface QueueUser {
   id: number;
   username: string;
@@ -36,6 +50,7 @@ interface QueueWorkItem {
   error: string | null;
   errorCode: string | null;
   errorStatusCode: number | null;
+  resultPreview: string | null;
 }
 
 interface QueueRun {
@@ -118,12 +133,7 @@ function healthTag(health: QueueHealth, label: string) {
 
 function workStatusTag(status: string) {
   const color = status === "running" ? "processing" : status === "queued" ? "blue" : status === "blocked" ? "default" : status === "manual_review" ? "warning" : status === "manual_review_archived" ? "default" : "success";
-  const label: Record<string, string> = {
-    queued: "排队中", running: "执行中", blocked: "等待依赖", manual_review: "待人工复核",
-    manual_review_completed: "人工复核已完成", manual_review_archived: "人工复核已归档",
-    completed: "已完成", cancelled: "已取消",
-  };
-  return <Tag color={color}>{label[status] || status}</Tag>;
+  return <Tag color={color}>{WORK_STATUS_LABELS[status] || status}</Tag>;
 }
 
 export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalProps) {
@@ -179,7 +189,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     { title: "创建时间", width: 175, render: (_, run) => formatDate(run.createdAt) },
     {
       title: "进度", width: 135,
-      render: (_, run) => <Space size={3} wrap>{Object.entries(run.workSummary).map(([name, count]) => <Tag key={name}>{name}: {count}</Tag>)}</Space>,
+      render: (_, run) => <Space size={3} wrap>{Object.entries(run.workSummary).map(([name, count]) => <Tag key={name}>{WORK_STATUS_LABELS[name] || name}: {count}</Tag>)}</Space>,
     },
     {
       title: "诊断", width: 220,
@@ -201,6 +211,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     { title: "阶段", dataIndex: "stage", width: 105 },
     { title: "Provider", dataIndex: "provider", width: 90 },
     { title: "状态", dataIndex: "status", width: 110, render: workStatusTag },
+    { title: "结果摘要", dataIndex: "resultPreview", width: 300, render: (value: string | null) => value ? <Text ellipsis={{ tooltip: value }}>{value}</Text> : "-" },
     { title: "重试", dataIndex: "attemptNo", width: 75, render: (value: number) => `${value} 次` },
     { title: "可执行时间", dataIndex: "availableAt", width: 175, render: formatDate },
     { title: "租约到期", dataIndex: "leaseExpiresAt", width: 175, render: formatDate },
@@ -264,7 +275,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
       <Table<QueueRun>
         rowKey="id" loading={isLoading} columns={columns} dataSource={data?.items || []} scroll={{ x: 1650 }}
         expandable={{
-          expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} columns={workColumns} dataSource={run.workItems} scroll={{ x: 1130 }} />,
+          expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} columns={workColumns} dataSource={[...run.workItems].sort((left, right) => (left.status === "completed" ? -1 : 0) - (right.status === "completed" ? -1 : 0) || left.attemptNo - right.attemptNo)} scroll={{ x: 1430 }} />,
           rowExpandable: (run) => run.workItems.length > 0,
         }}
         pagination={{
