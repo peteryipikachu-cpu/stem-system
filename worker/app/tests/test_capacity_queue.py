@@ -6,16 +6,22 @@ import pytest
 from app.config import Settings
 from app.models import CheckRun, CheckWorkItem, Question
 from app.queue import provider_limit, provider_scope
-from app.services import execute_model, make_check_work_items, provider_error
+from app.services import (
+    execute_model,
+    make_check_work_items,
+    normalized_math_answer,
+    parsed_equivalence_flags,
+    provider_error,
+)
 
 
-def test_full_check_creates_sixteen_work_items_with_batch_owner() -> None:
+def test_full_check_creates_model_specific_work_items_with_batch_owner() -> None:
     run = CheckRun(id=uuid.uuid4(), question_id=42, priority="batch", prompt_version="v1")
     items = make_check_work_items(run, ["latex", "difficulty", "answer", "synthesis"], queue_owner_id=7)
 
-    assert len(items) == 16
-    assert sum(item.provider == "doubao" for item in items) == 11
-    assert sum(item.provider == "gemini" for item in items) == 4
+    assert len(items) == 20
+    assert sum(item.provider == "doubao" for item in items) == 19
+    assert sum(item.provider == "gemini" for item in items) == 0
     assert sum(item.provider == "rule" for item in items) == 1
     assert {item.queue_owner_id for item in items} == {7}
 
@@ -73,6 +79,36 @@ def test_missing_provider_key_is_not_retryable() -> None:
     assert retryable is False
 
 
+def test_normalized_math_answer_ignores_display_delimiters() -> None:
+    assert normalized_math_answer("$\\frac{3}{16}$") == "\\frac{3}{16}"
+    assert normalized_math_answer(" $$ \\dfrac{3}{16} $$ ") == "\\frac{3}{16}"
+
+
+def test_equivalence_parser_accepts_structured_boolean_response() -> None:
+    assert parsed_equivalence_flags('{"equivalences": [true, false, true]}', 3) == [True, False, True]
+
+
+@pytest.mark.asyncio
+async def test_identical_math_answers_bypass_model_equivalence_call(monkeypatch) -> None:
+    async def unexpected_call(*_args, **_kwargs):
+        raise AssertionError("canonical matches must not call the model")
+
+    monkeypatch.setattr("app.services.call_chat", unexpected_call)
+    settings = Settings(gemini_api_key="test-key")
+    question = Question(question="求值", answer="$\\frac{3}{16}$")
+    work = CheckWorkItem(
+        provider="gemini",
+        check_type="answer",
+        stage="equivalence",
+        payload={"answers": ["$$\\frac{3}{16}$$", "$\\frac{3}{16}$"]},
+    )
+
+    result, raw_responses = await execute_model(work, question, settings)
+
+    assert result["equivalences"] == [True, True]
+    assert raw_responses == [{"canonicalMatches": 2}]
+
+
 @pytest.mark.asyncio
 async def test_doubao_solve_uses_final_answer_format_without_max_tokens(monkeypatch) -> None:
     request_bodies = []
@@ -83,11 +119,11 @@ async def test_doubao_solve_uses_final_answer_format_without_max_tokens(monkeypa
 
     monkeypatch.setattr("app.services.call_chat", fake_call_chat)
     settings = Settings(doubao_api_key="test-key")
-    question = Question(question="解方程 x^2 = 1", answer="x=1 或 x=-1")
+    question = Question(question="求 1 加 1", answer="2")
 
     await execute_model(CheckWorkItem(provider="doubao", stage="solve", payload={}), question, settings)
     await execute_model(
-        CheckWorkItem(provider="doubao", stage="equivalence", payload={"answers": ["x=1 或 x=-1"]}),
+        CheckWorkItem(provider="doubao", stage="equivalence", payload={"answers": ["1+1"]}),
         question,
         settings,
     )
@@ -100,6 +136,7 @@ async def test_doubao_solve_uses_final_answer_format_without_max_tokens(monkeypa
     assert request_bodies[1]["thinking"] == {"type": "disabled"}
     assert "reasoning" not in request_bodies[1]
     assert "max_tokens" not in request_bodies[1]
+    assert "仅输出合法 JSON" in request_bodies[1]["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

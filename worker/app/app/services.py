@@ -463,6 +463,86 @@ def difficulty_answer_prompt(question: str) -> str:
     return solve_prompt(question)
 
 
+def normalized_math_answer(answer: Any) -> str:
+    """Normalize harmless presentation differences before equivalence judging."""
+    value = str(answer or "").strip()
+    for opening, closing in (("$$", "$$"), ("$", "$"), ("\\[", "\\]"), ("\\(", "\\)")):
+        if value.startswith(opening) and value.endswith(closing) and len(value) >= len(opening) + len(closing):
+            value = value[len(opening):len(value) - len(closing)].strip()
+            break
+    value = re.sub(r"\s+", "", value)
+    return value.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac").replace("\\left", "").replace("\\right", "")
+
+
+def equivalence_prompt(reference_answer: str, answers: list[str]) -> str:
+    numbered_answers = "\n".join(f"{index}. {answer}" for index, answer in enumerate(answers, start=1))
+    return f"""你是严谨的数学答案等价判定器。比较每个模型答案与参考答案是否数学等价。
+
+参考答案：{reference_answer}
+待判断的模型答案（顺序不可改变）：
+{numbered_answers}
+
+判断规则：
+1. `$...$`、`$$...$$`、空白、`\\dfrac` 与 `\\frac` 等纯展示差异不影响等价。
+2. 只在数学值或所要求的唯一结论确实一致时标记为 true。
+3. 必须按输入顺序返回与模型答案数量完全一致的布尔值。
+
+仅输出合法 JSON，不要 Markdown、解释、推导或其他文本：
+{{"equivalences":[true,false]}}"""
+
+
+def parsed_equivalence_flags(content: str, expected_count: int) -> list[bool]:
+    """Parse structured model output, with a text fallback for older responses."""
+    parsed: Any = None
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", content, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+    if isinstance(parsed, dict) and isinstance(parsed.get("equivalences"), list):
+        flags = [
+            value if isinstance(value, bool) else str(value).strip().lower() in {"true", "yes"}
+            for value in parsed["equivalences"]
+        ]
+    else:
+        flags = [token.lower() in {"yes", "true"} for token in re.findall(r"\b(YES|NO|TRUE|FALSE)\b", content, re.IGNORECASE)]
+    return (flags + [False] * expected_count)[:expected_count]
+
+
+async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_key: Optional[str],
+                             model: AuditModel, reference_answer: str, answers: list[str],
+                             request_options: Optional[dict[str, Any]] = None) -> tuple[list[bool], dict[str, Any]]:
+    """Return one verdict per answer, preserving canonical matches locally."""
+    canonical_reference = normalized_math_answer(reference_answer)
+    flags: list[Optional[bool]] = [
+        True if canonical_reference and normalized_math_answer(answer) == canonical_reference else None
+        for answer in answers
+    ]
+    pending_indexes = [index for index, flag in enumerate(flags) if flag is None]
+    if not pending_indexes:
+        return [True] * len(answers), {"canonicalMatches": len(answers)}
+
+    pending_answers = [answers[index] for index in pending_indexes]
+    request_body: dict[str, Any] = {
+        "model": model.id,
+        "messages": [{"role": "user", "content": equivalence_prompt(reference_answer, pending_answers)}],
+        "temperature": 0,
+    }
+    if request_options:
+        request_body.update(request_options)
+    content, raw = await call_chat(client, base_url, api_key, request_body)
+    parsed_flags = parsed_equivalence_flags(content, len(pending_answers))
+    for index, flag in zip(pending_indexes, parsed_flags):
+        flags[index] = flag
+    raw["equivalenceContent"] = content
+    raw["canonicalMatches"] = len(answers) - len(pending_indexes)
+    return [bool(flag) for flag in flags], raw
+
+
 async def execute_model(work: CheckWorkItem, question: Question, settings: Settings,
                         doubao_api_key: Optional[str] = None) -> tuple[dict[str, Any], list[Any]]:
     model = work_audit_model(work)
@@ -473,15 +553,11 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
             api_key = doubao_api_key or settings.doubao_api_key
             if work.stage == "equivalence":
                 answers = work.payload.get("answers", [])
-                prompt = f"参考答案：{question.answer}\\n模型答案：{answers}\\n逐项判断是否数学等价，每项单独一行，只输出 YES 或 NO。"
-                content, raw = await call_chat(client, settings.doubao_base_url, api_key, {
-                    "model": model.id,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "thinking": {"type": "disabled"},
-                    "temperature": 0,
-                })
-                flags = [token == "YES" for token in re.findall(r"\\b(YES|NO)\\b", content.upper())]
-                flags = (flags + [False] * len(answers))[:len(answers)]
+                flags, raw = await judge_equivalences(
+                    client, base_url=settings.doubao_base_url, api_key=api_key, model=model,
+                    reference_answer=question.answer, answers=answers,
+                    request_options={"thinking": {"type": "disabled"}},
+                )
                 return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
             if work.stage == "synthesis":
                 prompt = f"""你是 STEM 题目来源识别审核员。判断下列题目是否疑似由生成式 AI 生成。
@@ -511,13 +587,11 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
             api_key = settings.gemini_keys[0] if settings.gemini_keys else None
             if work.stage == "equivalence":
                 answers = work.payload.get("answers", [])
-                prompt = f"参考答案：{question.answer}\\n模型答案：{answers}\\n逐项判断是否数学等价，每项单独一行，只输出 YES 或 NO。"
-                content, raw = await call_chat(client, settings.gemini_base_url, api_key, {
-                    "model": model.id, "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0,
-                })
-                flags = [token == "YES" for token in re.findall(r"\\b(YES|NO)\\b", content.upper())]
-                flags = (flags + [False] * len(answers))[:len(answers)]
+                flags, raw = await judge_equivalences(
+                    client, base_url=settings.gemini_base_url, api_key=api_key, model=model,
+                    reference_answer=question.answer, answers=answers,
+                    request_options={"thinking": {"type": "enabled"}, "reasoning": {"effort": "high"}},
+                )
                 return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
             if work.stage == "synthesis":
                 prompt = f"""判断下列题目是否疑似由生成式 AI 生成。只分析 AI 生成痕迹，不能用题目难度、专业性、正确性或标准公式作为证据；证据不足时判定 false。只输出 JSON：{{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}\n题目：{question.question}\n参考答案：{question.answer}"""

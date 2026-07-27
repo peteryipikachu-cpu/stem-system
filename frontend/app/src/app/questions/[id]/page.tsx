@@ -96,7 +96,39 @@ function finalAnswerOnly(response: string): string {
   return candidate.split(/\n\s*\n/)[0].trim() || "(空回复)";
 }
 
-function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: CheckResultData; onRecheck: () => void; duration?: number; readOnly?: boolean }) {
+function CheckProgressContent({ progress }: { progress?: ActiveCheckProgress }) {
+  if (!progress || progress.total <= 0) return null;
+
+  const solveSummary = progress.solveTotal > 0
+    ? `已完成 ${progress.solveCompleted}/${progress.solveTotal} 次独立作答`
+    : `已完成 ${progress.completed}/${progress.total}`;
+
+  return (
+    <div>
+      <Space wrap size={6}>
+        <Tag color="processing">{solveSummary}</Tag>
+        {progress.solveRunning > 0 && <Tag>执行中 {progress.solveRunning}</Tag>}
+        {progress.queued > 0 && <Tag>排队中 {progress.queued}</Tag>}
+        {progress.waitingForResult && <Tag color="default">等待结果判断</Tag>}
+      </Space>
+      {progress.completedAnswers.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>已完成作答：</Text>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
+            {progress.completedAnswers.map((answer) => (
+              <div key={answer.attempt} style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, padding: "6px 10px", fontSize: 12 }}>
+                <Text strong style={{ fontSize: 12 }}>第{answer.attempt}次</Text>
+                <div style={{ marginTop: 2 }}><LatexRenderer content={finalAnswerOnly(answer.answer)} /></div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CheckResultCard({ cr, onRecheck, duration, progress, readOnly = false }: { cr: CheckResultData; onRecheck: () => void; duration?: number; progress?: ActiveCheckProgress; readOnly?: boolean }) {
   let detail: Record<string, unknown> = {};
   try {
     detail = JSON.parse(cr.detail || "{}");
@@ -273,6 +305,7 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
           <ResultIcon result={cr.result} />
           <Text strong>{label}</Text>
           <ResultTag result={cr.result} />
+          {progress && <Tag color="processing"><SyncOutlined spin /> 检测中</Tag>}
           {duration !== undefined && (
             <Tag color="default" style={{ fontSize: 11 }}>{(duration / 1000).toFixed(1)}s</Tag>
           )}
@@ -283,51 +316,17 @@ function CheckResultCard({ cr, onRecheck, duration, readOnly = false }: { cr: Ch
           重新检测
         </Button>
       ) : null}
-      style={{ marginBottom: 12 }}
-      styles={{ body: { padding: "12px 16px" } }}
+    style={{ marginBottom: 12 }}
+    styles={{ body: { padding: "12px 16px" } }}
     >
+      {progress && (
+        <>
+          <Text type="secondary" style={{ fontSize: 12 }}>本次质检进度：</Text>
+          <div style={{ marginTop: 6 }}><CheckProgressContent progress={progress} /></div>
+          <Divider style={{ margin: "12px 0" }} />
+        </>
+      )}
       {renderDetail()}
-    </Card>
-  );
-}
-
-function ActiveCheckProgressCard({ progress }: { progress: ActiveCheckProgress[] }) {
-  const visibleProgress = progress.filter((item) => item.total > 0);
-  if (visibleProgress.length === 0) return null;
-  return (
-    <Card size="small" title="本次质检进度" style={{ marginBottom: 12 }} styles={{ body: { padding: "12px 16px" } }}>
-      <Space orientation="vertical" size={12} style={{ width: "100%" }}>
-        {visibleProgress.map((item) => {
-          const label = CHECK_TYPE_LABELS[item.checkType as CheckType] || item.checkType;
-          const solveSummary = item.solveTotal > 0
-            ? `已完成 ${item.solveCompleted}/${item.solveTotal} 次独立作答`
-            : `已完成 ${item.completed}/${item.total}`;
-          return (
-            <div key={item.checkType}>
-              <Space wrap size={6}>
-                <Text strong>{label}</Text>
-                <Tag color="processing">{solveSummary}</Tag>
-                {item.solveRunning > 0 && <Tag>执行中 {item.solveRunning}</Tag>}
-                {item.queued > 0 && <Tag>排队中 {item.queued}</Tag>}
-                {item.waitingForResult && <Tag color="default">等待结果判断</Tag>}
-              </Space>
-              {item.completedAnswers.length > 0 && (
-                <div style={{ marginTop: 8 }}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>已完成作答：</Text>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 6 }}>
-                    {item.completedAnswers.map((answer) => (
-                      <div key={answer.attempt} style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, padding: "6px 10px", fontSize: 12 }}>
-                        <Text strong style={{ fontSize: 12 }}>第{answer.attempt}次</Text>
-                        <div style={{ marginTop: 2 }}><LatexRenderer content={finalAnswerOnly(answer.answer)} /></div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </Space>
     </Card>
   );
 }
@@ -681,10 +680,6 @@ export default function QuestionDetailPage() {
     : checkingTypes;
   const recoveredProgress = activeRuns.some((run) => run.status === "running") ? "检测中" : "排队中";
   const currentRunProgress = activeRuns.flatMap((run) => activeRunProgress[run.id] || run.progress || []);
-  const activeProgress = Array.from(recoveredCheckingTypes).map((type) => {
-    const label = CHECK_TYPE_LABELS[type as CheckType] || type;
-    return `${label}：${checkProgress[type] || recoveredProgress}`;
-  });
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -847,12 +842,9 @@ export default function QuestionDetailPage() {
               {!isHistorical && recoveredCheckingTypes.size > 0 && (
                 <Alert
                   type="info"
-                  title={`正在质检：${activeProgress.join(" · ") || recoveredProgress}`}
+                  title="正在执行质检任务，实时进度请查看对应检查项。"
                   style={{ marginBottom: 12 }}
                 />
-              )}
-              {!isHistorical && currentRunProgress.length > 0 && (
-                <ActiveCheckProgressCard progress={currentRunProgress} />
               )}
               {!isHistorical && checkingTypes.size === 0 && checkDurations["__total"] && (
                 <div style={{ marginBottom: 12, padding: "6px 12px", background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 6, fontSize: 12 }}>
@@ -873,6 +865,7 @@ export default function QuestionDetailPage() {
                 const cr = question.checkResults?.find((r) => r.checkType === type);
                 const label = CHECK_TYPE_LABELS[type as CheckType];
                 const isChecking = !isHistorical && recoveredCheckingTypes.has(type);
+                const progress = currentRunProgress.find((item) => item.checkType === type);
 
                 if (!cr) {
                   return (
@@ -903,7 +896,11 @@ export default function QuestionDetailPage() {
                       style={{ marginBottom: 12 }}
                       styles={{ body: { padding: "8px 16px" } }}
                     >
-                      <Text type="secondary" style={{ fontSize: 12 }}>尚未运行此项质检</Text>
+                      {isChecking ? (
+                        progress ? <CheckProgressContent progress={progress} /> : <Text type="secondary" style={{ fontSize: 12 }}>正在启动此项质检…</Text>
+                      ) : (
+                        <Text type="secondary" style={{ fontSize: 12 }}>尚未运行此项质检</Text>
+                      )}
                     </Card>
                   );
                 }
@@ -914,6 +911,7 @@ export default function QuestionDetailPage() {
                     cr={cr}
                     onRecheck={() => handleCheck([type])}
                     duration={checkDurations[type]}
+                    progress={isChecking ? progress : undefined}
                     readOnly={isHistorical}
                   />
                 );

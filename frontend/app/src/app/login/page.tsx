@@ -1,14 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
 import { Button, Card, Form, Input, Typography, message } from "antd";
 import { LockOutlined, UserOutlined } from "@ant-design/icons";
 
 const { Title, Text } = Typography;
 
 export default function LoginPage() {
-  const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
 
   const submit = async (values: { username: string; password: string }) => {
@@ -22,7 +20,8 @@ export default function LoginPage() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "登录失败");
       message.success(`欢迎回来，${data.username}`);
-      router.replace("/");
+      // 登录响应刚写入 HttpOnly Cookie；用整页替换避免复用登录前的 App Router 缓存。
+      window.location.replace("/");
     } catch (error) {
       message.error(error instanceof Error ? error.message : "登录失败");
     } finally {
