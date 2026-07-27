@@ -4,7 +4,7 @@ import { useState } from "react";
 import useSWR from "swr";
 import Link from "next/link";
 import { Alert, Button, Col, message, Modal, Row, Select, Space, Statistic, Table, Tag, Typography } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { ReloadOutlined, SyncOutlined } from "@ant-design/icons";
 import type { ColumnsType } from "antd/es/table";
 import { CHECK_TYPE_LABELS, type CheckType } from "@/types";
 import { auditModelLabel } from "@/lib/audit-models";
@@ -114,6 +114,15 @@ async function resolveManualReview(runId: string, action: "completed" | "archive
   if (!response.ok) throw new Error(data.detail || text || "人工复核状态更新失败");
 }
 
+async function retryQueueRun(runId: string): Promise<{ checkRunId: string }> {
+  const response = await fetch(`/api/admin/queue/check-runs/${runId}/retry`, { method: "POST" });
+  const text = await response.text();
+  let data: { detail?: string; checkRunId?: string } = {};
+  try { data = text ? JSON.parse(text) : {}; } catch { /* 保留服务端非 JSON 错误文本 */ }
+  if (!response.ok || !data.checkRunId) throw new Error(data.detail || text || "重新检测创建失败");
+  return { checkRunId: data.checkRunId };
+}
+
 function formatDate(value: string | null): string {
   if (!value) return "-";
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
@@ -144,6 +153,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
   const [provider, setProvider] = useState<string>();
   const [page, setPage] = useState(1);
   const [resolvingRunId, setResolvingRunId] = useState<string>();
+  const [retryingRunId, setRetryingRunId] = useState<string>();
   const params = new URLSearchParams({ status, health, page: String(page), pageSize: "20" });
   if (provider) params.set("provider", provider);
   const { data, error, isLoading, mutate } = useSWR<QueueResponse>(
@@ -177,6 +187,29 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     });
   };
 
+  const requestRetry = (run: QueueRun) => {
+    const checkTypes = run.checkTypes.map((type) => CHECK_TYPE_LABELS[type] || type).join("、");
+    modal.confirm({
+      title: "重新检测",
+      content: `将归档当前失败或阻塞的工作项，并使用原模型 ${auditModelLabel(run.model)} 重新执行${checkTypes}。旧任务的历史结果会保留，是否继续？`,
+      okText: "重新检测",
+      cancelText: "取消",
+      onOk: async () => {
+        setRetryingRunId(run.id);
+        try {
+          await retryQueueRun(run.id);
+          messageApi.success("已创建新的质检任务");
+          await mutate();
+        } catch (requestError) {
+          messageApi.error(requestError instanceof Error ? requestError.message : "重新检测失败");
+          throw requestError;
+        } finally {
+          setRetryingRunId(undefined);
+        }
+      },
+    });
+  };
+
   const columns: ColumnsType<QueueRun> = [
     {
       title: "题目", width: 210,
@@ -196,13 +229,20 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
       render: (_, run) => <span>{healthTag(run.diagnosis.health, run.diagnosis.label)}<Text type="secondary">{run.diagnosis.reason}</Text></span>,
     },
     {
-      title: "操作", width: 200,
-      render: (_, run) => (run.workSummary.manual_review || 0) > 0 ? (
+      title: "操作", width: 285,
+      render: (_, run) => {
+        const canRetry = (run.workSummary.manual_review || 0) > 0 || run.diagnosis.health === "stuck";
+        const hasRunningWork = (run.workSummary.running || 0) > 0;
+        const hasManualReview = (run.workSummary.manual_review || 0) > 0;
+        if (!canRetry && !hasManualReview) return "-";
+        return (
         <Space size={6}>
-          <Button size="small" type="primary" loading={resolvingRunId === run.id} onClick={() => requestManualReviewResolution(run, "completed")}>完成复核</Button>
-          <Button size="small" disabled={resolvingRunId === run.id} onClick={() => requestManualReviewResolution(run, "archived")}>归档</Button>
+          {canRetry && <Button size="small" type="primary" icon={<SyncOutlined />} loading={retryingRunId === run.id} disabled={hasRunningWork || resolvingRunId === run.id} onClick={() => requestRetry(run)}>重新检测</Button>}
+          {hasManualReview && <Button size="small" loading={resolvingRunId === run.id} disabled={retryingRunId === run.id} onClick={() => requestManualReviewResolution(run, "completed")}>完成复核</Button>}
+          {hasManualReview && <Button size="small" disabled={resolvingRunId === run.id || retryingRunId === run.id} onClick={() => requestManualReviewResolution(run, "archived")}>归档</Button>}
         </Space>
-      ) : "-",
+        );
+      },
     },
   ];
 
@@ -214,7 +254,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     { title: "结果摘要", dataIndex: "resultPreview", width: 300, render: (value: string | null) => value ? <Text ellipsis={{ tooltip: value }}>{value}</Text> : "-" },
     { title: "重试", dataIndex: "attemptNo", width: 75, render: (value: number) => `${value} 次` },
     { title: "可执行时间", dataIndex: "availableAt", width: 175, render: formatDate },
-    { title: "租约到期", dataIndex: "leaseExpiresAt", width: 175, render: formatDate },
+    { title: "执行占用截至", dataIndex: "leaseExpiresAt", width: 175, render: formatDate },
     {
       title: "错误摘要", width: 280,
       render: (_, item) => item.error ? <Text type="danger" ellipsis={{ tooltip: item.error }}>{item.errorCode ? `${item.errorCode}: ${item.error}` : item.error}</Text> : "-",
@@ -273,7 +313,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
       </Row>
 
       <Table<QueueRun>
-        rowKey="id" loading={isLoading} columns={columns} dataSource={data?.items || []} scroll={{ x: 1650 }}
+        rowKey="id" loading={isLoading} columns={columns} dataSource={data?.items || []} scroll={{ x: 1735 }}
         expandable={{
           expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} columns={workColumns} dataSource={[...run.workItems].sort((left, right) => (left.status === "completed" ? -1 : 0) - (right.status === "completed" ? -1 : 0) || left.attemptNo - right.attemptNo)} scroll={{ x: 1430 }} />,
           rowExpandable: (run) => run.workItems.length > 0,

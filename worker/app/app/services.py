@@ -428,6 +428,11 @@ async def call_chat(client: httpx.AsyncClient, base_url: str, api_key: Optional[
         response.raise_for_status()
         raw = response.json()
         return raw.get("choices", [{}])[0].get("message", {}).get("content", ""), raw
+    # `client.stream()` only consumes an HTTP response incrementally.  The
+    # OpenAI-compatible gateway must also be told to produce SSE chunks.
+    # Copy the payload so callers can safely retain it for auditing/tests.
+    body = {**body, "stream": True}
+    headers["Accept"] = "text/event-stream"
     content = ""
     usage: Optional[dict[str, Any]] = None
     async with client.stream("POST", f"{base_url}/chat/completions", json=body, headers=headers) as response:
@@ -474,9 +479,12 @@ def normalized_math_answer(answer: Any) -> str:
     return value.replace("\\dfrac", "\\frac").replace("\\tfrac", "\\frac").replace("\\left", "").replace("\\right", "")
 
 
-def equivalence_prompt(reference_answer: str, answers: list[str]) -> str:
+def equivalence_prompt(question: str, reference_answer: str, answers: list[str]) -> str:
     numbered_answers = "\n".join(f"{index}. {answer}" for index, answer in enumerate(answers, start=1))
-    return f"""你是严谨的数学答案等价判定器。比较每个模型答案与参考答案是否数学等价。
+    return f"""你是严谨的 STEM 答案等价判定器。结合题目上下文，比较每个模型答案与参考答案是否表达同一个正确结论。题目可能属于数学、物理、化学、生物或其他 STEM 学科。
+
+题目：
+{question}
 
 参考答案：{reference_answer}
 待判断的模型答案（顺序不可改变）：
@@ -484,8 +492,15 @@ def equivalence_prompt(reference_answer: str, answers: list[str]) -> str:
 
 判断规则：
 1. `$...$`、`$$...$$`、空白、`\\dfrac` 与 `\\frac` 等纯展示差异不影响等价。
-2. 只在数学值或所要求的唯一结论确实一致时标记为 true。
-3. 必须按输入顺序返回与模型答案数量完全一致的布尔值。
+2. 按答案表达的语义和题目所求的唯一结论判定，不要机械逐字比较。对于题干或参考答案已明确对象的“数量 + 计数单位/量词”，只要数值相同且没有引入其他含义，省略计数单位或量词仍然等价。例如生物题中参考答案为 `3对`、`3 个`、`3种`，模型答案仅为 `3` 时应标记为 true；反向情形也相同。
+3. 不能把会改变量纲、对象、条件、正负号、范围、选项或解集的内容视为等价。尤其在物理、化学题中，带有长度、质量、时间、物质的量、浓度、温度等量纲或单位时，单位通常不可省略。例如 `3 cm` 与 `3`、`3 mol` 与 `3`、`3 或 4` 与 `3` 均为 false。
+4. 只在数学值或所要求的唯一结论确实一致时标记为 true；不确定时应依据上述语义规则审慎判断，而不是因文字单位差异直接判 false。
+5. 必须按输入顺序返回与模型答案数量完全一致的布尔值。
+
+判定示例：
+- 参考答案 `3对`，模型答案 `3`：true。
+- 参考答案 `$\\frac{{3}}{{16}}$`，模型答案 `3/16`：true。
+- 参考答案 `3 cm`，模型答案 `3`：false。
 
 仅输出合法 JSON，不要 Markdown、解释、推导或其他文本：
 {{"equivalences":[true,false]}}"""
@@ -514,8 +529,9 @@ def parsed_equivalence_flags(content: str, expected_count: int) -> list[bool]:
 
 
 async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_key: Optional[str],
-                             model: AuditModel, reference_answer: str, answers: list[str],
-                             request_options: Optional[dict[str, Any]] = None) -> tuple[list[bool], dict[str, Any]]:
+                             model: AuditModel, question_text: str, reference_answer: str, answers: list[str],
+                             request_options: Optional[dict[str, Any]] = None,
+                             stream: bool = False) -> tuple[list[bool], dict[str, Any]]:
     """Return one verdict per answer, preserving canonical matches locally."""
     canonical_reference = normalized_math_answer(reference_answer)
     flags: list[Optional[bool]] = [
@@ -529,12 +545,12 @@ async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_ke
     pending_answers = [answers[index] for index in pending_indexes]
     request_body: dict[str, Any] = {
         "model": model.id,
-        "messages": [{"role": "user", "content": equivalence_prompt(reference_answer, pending_answers)}],
+        "messages": [{"role": "user", "content": equivalence_prompt(question_text, reference_answer, pending_answers)}],
         "temperature": 0,
     }
     if request_options:
         request_body.update(request_options)
-    content, raw = await call_chat(client, base_url, api_key, request_body)
+    content, raw = await call_chat(client, base_url, api_key, request_body, stream=stream)
     parsed_flags = parsed_equivalence_flags(content, len(pending_answers))
     for index, flag in zip(pending_indexes, parsed_flags):
         flags[index] = flag
@@ -555,8 +571,9 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 answers = work.payload.get("answers", [])
                 flags, raw = await judge_equivalences(
                     client, base_url=settings.doubao_base_url, api_key=api_key, model=model,
-                    reference_answer=question.answer, answers=answers,
+                    question_text=question.question, reference_answer=question.answer, answers=answers,
                     request_options={"thinking": {"type": "disabled"}},
+                    stream=True,
                 )
                 return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
             if work.stage == "synthesis":
@@ -571,7 +588,13 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
 
 只输出 JSON：
 {{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}"""
-                content, raw = await call_chat(client, settings.doubao_base_url, api_key, {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0})
+                content, raw = await call_chat(
+                    client,
+                    settings.doubao_base_url,
+                    api_key,
+                    {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0},
+                    stream=True,
+                )
                 return {"answer": content[:10000]}, [raw]
             # 难度校验只保留最终答案；答案比对阶段则在上方显式关闭思考。
             prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
@@ -581,7 +604,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 "thinking": {"type": "enabled"},
                 "reasoning": {"effort": "high"},
                 "temperature": 0,
-            })
+            }, stream=True)
             return {"answer": content[:10000]}, [raw]
         if work.provider == "gemini":
             api_key = settings.gemini_keys[0] if settings.gemini_keys else None
@@ -589,7 +612,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 answers = work.payload.get("answers", [])
                 flags, raw = await judge_equivalences(
                     client, base_url=settings.gemini_base_url, api_key=api_key, model=model,
-                    reference_answer=question.answer, answers=answers,
+                    question_text=question.question, reference_answer=question.answer, answers=answers,
                     request_options={"thinking": {"type": "enabled"}, "reasoning": {"effort": "high"}},
                 )
                 return {"equivalences": flags, "usage": raw.get("usage")}, [raw]

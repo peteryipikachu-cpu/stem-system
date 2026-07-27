@@ -1,3 +1,4 @@
+import json
 import uuid
 
 import httpx
@@ -7,11 +8,13 @@ from app.config import Settings
 from app.models import CheckRun, CheckWorkItem, Question
 from app.queue import provider_limit, provider_scope
 from app.services import (
+    call_chat,
     execute_model,
     make_check_work_items,
     normalized_math_answer,
     parsed_equivalence_flags,
     provider_error,
+    equivalence_prompt,
 )
 
 
@@ -88,6 +91,15 @@ def test_equivalence_parser_accepts_structured_boolean_response() -> None:
     assert parsed_equivalence_flags('{"equivalences": [true, false, true]}', 3) == [True, False, True]
 
 
+def test_equivalence_prompt_covers_stem_context_and_counting_units() -> None:
+    prompt = equivalence_prompt("某植物由若干对等位基因控制", "3对", ["3"])
+
+    assert "数学、物理、化学、生物或其他 STEM 学科" in prompt
+    assert "题目：\n某植物由若干对等位基因控制" in prompt
+    assert "生物题中参考答案为 `3对`、`3 个`、`3种`，模型答案仅为 `3` 时应标记为 true" in prompt
+    assert "`3 cm` 与 `3`、`3 mol` 与 `3`" in prompt
+
+
 @pytest.mark.asyncio
 async def test_identical_math_answers_bypass_model_equivalence_call(monkeypatch) -> None:
     async def unexpected_call(*_args, **_kwargs):
@@ -112,9 +124,11 @@ async def test_identical_math_answers_bypass_model_equivalence_call(monkeypatch)
 @pytest.mark.asyncio
 async def test_doubao_solve_uses_final_answer_format_without_max_tokens(monkeypatch) -> None:
     request_bodies = []
+    stream_flags = []
 
     async def fake_call_chat(_, __, ___, body, stream=False):
         request_bodies.append(body)
+        stream_flags.append(stream)
         return "YES", {"usage": {}}
 
     monkeypatch.setattr("app.services.call_chat", fake_call_chat)
@@ -137,6 +151,29 @@ async def test_doubao_solve_uses_final_answer_format_without_max_tokens(monkeypa
     assert "reasoning" not in request_bodies[1]
     assert "max_tokens" not in request_bodies[1]
     assert "仅输出合法 JSON" in request_bodies[1]["messages"][0]["content"]
+    assert stream_flags == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_streaming_call_requests_sse_and_accumulates_content() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["accept"] == "text/event-stream"
+        assert json.loads(request.content) == {"model": "doubao", "stream": True}
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b'data: {"choices":[{"delta":{"content":"3"}}]}\n\n'
+                b'data: {"choices":[{"delta":{"content":"/16"}}]}\n\n'
+                b'data: [DONE]\n\n'
+            ),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        content, raw = await call_chat(client, "https://example.test/v1", "test-key", {"model": "doubao"}, stream=True)
+
+    assert content == "3/16"
+    assert raw["choices"][0]["message"]["content"] == "3/16"
 
 
 @pytest.mark.asyncio

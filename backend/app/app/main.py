@@ -775,6 +775,54 @@ async def resolve_manual_review(
     return {"runId": str(run.id), "status": run.status, "resolvedStatus": resolved_status, "resolvedCount": len(works)}
 
 
+@app.post("/api/admin/queue/check-runs/{run_id}/retry", response_model=AcceptedRun, status_code=status.HTTP_202_ACCEPTED)
+async def retry_queue_run(
+    run_id: uuid.UUID,
+    current_user: User = Depends(require_admin),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """Archive a failed/stalled queue run and create a fresh run with its original model."""
+    run = await session.get(CheckRun, run_id, with_for_update=True)
+    if not run:
+        raise HTTPException(404, "质检任务不存在")
+    running_work = await session.scalar(select(CheckWorkItem.id).where(
+        CheckWorkItem.run_id == run_id,
+        CheckWorkItem.status == "running",
+    ).limit(1))
+    if running_work:
+        raise HTTPException(409, "任务仍有正在执行的工作项，暂不能重新检测")
+
+    retryable_work = (await session.scalars(select(CheckWorkItem).where(
+        CheckWorkItem.run_id == run_id,
+        CheckWorkItem.status.in_(["queued", "blocked", "manual_review"]),
+    ).with_for_update())).all()
+    if not retryable_work:
+        raise HTTPException(409, "当前任务没有可重新检测的失败或阻塞工作项")
+
+    now = datetime.now(timezone.utc)
+    for work in retryable_work:
+        work.status = "manual_review_archived" if work.status == "manual_review" else "cancelled"
+        work.completed_at = work.completed_at or now
+        work.lease_owner = None
+        work.lease_expires_at = None
+    run.status = "manual_review_archived"
+    run.completed_at = run.completed_at or now
+    await session.flush()
+
+    model_id = (run.model_versions or {}).get("id")
+    retry = await create_run(
+        session,
+        redis,
+        run.question_id,
+        list(run.check_types or []),
+        f"admin-retry:{run.id}:{uuid.uuid4()}",
+        model_id=model_id,
+        requested_by_user_id=current_user.id,
+    )
+    await session.commit()
+    return {"checkRunId": retry.id, "status": retry.status}
+
+
 @app.get("/api/manual-reviews")
 async def list_manual_reviews(_: User = Depends(require_admin), session: AsyncSession = Depends(get_session)) -> list[dict[str, Any]]:
     works = (await session.scalars(
