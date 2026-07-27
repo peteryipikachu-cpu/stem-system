@@ -23,6 +23,7 @@ import {
 } from "antd";
 import {
   ArrowLeftOutlined,
+  ArrowRightOutlined,
   PlayCircleOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -80,6 +81,11 @@ interface CheckResultData {
   checkType: string;
   result: string;
   detail: string;
+}
+
+interface QuestionNavigation {
+  previous: { id: number; title: string } | null;
+  next: { id: number; title: string } | null;
 }
 
 function hasReusableCheckResult(result: CheckResultData): boolean {
@@ -410,6 +416,10 @@ export default function QuestionDetailPage() {
     id ? (isHistorical ? `/api/questions/${id}/versions/${historicalVersion}` : `/api/questions/${id}`) : null,
     fetcher
   );
+  const { data: navigation } = useSWR<QuestionNavigation>(
+    id && !isHistorical ? `/api/questions/${id}/navigation` : null,
+    fetcher
+  );
   const { data: currentUser, error: authError } = useSWR<{ username: string; role: "user" | "admin" }>("/api/auth/me", fetcher);
   const activeRuns = useMemo(() => (
     isHistorical
@@ -699,13 +709,32 @@ export default function QuestionDetailPage() {
             style={{ marginBottom: 16 }}
           />
         )}
-        <Breadcrumb
-          items={[
-            { title: <Link href="/">题目列表</Link> },
-            { title: isHistorical ? `历史版本 v${question.currentVersion}` : question.title || `题目 #${question.id}` },
-          ]}
-          style={{ marginBottom: 16 }}
-        />
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
+          <Breadcrumb
+            items={[
+              { title: <Link href="/">题目列表</Link> },
+              { title: isHistorical ? `历史版本 v${question.currentVersion}` : question.title || `题目 #${question.id}` },
+            ]}
+          />
+          {!isHistorical && (
+            <Space size={8}>
+              {navigation?.previous ? (
+                <Link href={`/questions/${navigation.previous.id}`} title={navigation.previous.title || `题目 #${navigation.previous.id}`}>
+                  <Button size="small" icon={<ArrowLeftOutlined />}>上一题</Button>
+                </Link>
+              ) : (
+                <Button size="small" icon={<ArrowLeftOutlined />} disabled>上一题</Button>
+              )}
+              {navigation?.next ? (
+                <Link href={`/questions/${navigation.next.id}`} title={navigation.next.title || `题目 #${navigation.next.id}`}>
+                  <Button size="small" icon={<ArrowRightOutlined />}>下一题</Button>
+                </Link>
+              ) : (
+                <Button size="small" icon={<ArrowRightOutlined />} disabled>下一题</Button>
+              )}
+            </Space>
+          )}
+        </div>
 
         <Row gutter={24}>
           {/* 左侧：题目内容 */}

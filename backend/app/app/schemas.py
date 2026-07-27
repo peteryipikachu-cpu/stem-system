@@ -39,6 +39,16 @@ class QuestionUpdate(QuestionInput):
         return value
 
 
+class QuestionNavigationItem(BaseModel):
+    id: int
+    title: str = ""
+
+
+class QuestionNavigation(BaseModel):
+    previous: Optional[QuestionNavigationItem] = None
+    next: Optional[QuestionNavigationItem] = None
+
+
 class CheckRequest(BaseModel):
     checkTypes: list[str] = Field(default_factory=lambda: DEFAULT_CHECK_TYPES.copy())
     model: Optional[str] = None

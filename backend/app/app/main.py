@@ -23,7 +23,7 @@ from .auth import SESSION_COOKIE, create_session_token, ensure_initial_admin, ge
 from .db import SessionLocal, engine, get_session
 from .models import Base, CheckBatch, CheckEvent, CheckRun, CheckWorkItem, Question, QuestionVersion, User
 from .queue import provider_limit
-from .schemas import AcceptedBatch, AcceptedRun, BatchCheckRequest, CheckRequest, LoginRequest, ManualReviewResolutionRequest, PasswordReset, QuestionCreate, QuestionUpdate, UserCreate
+from .schemas import AcceptedBatch, AcceptedRun, BatchCheckRequest, CheckRequest, LoginRequest, ManualReviewResolutionRequest, PasswordReset, QuestionCreate, QuestionNavigation, QuestionNavigationItem, QuestionUpdate, UserCreate
 from .services import ActiveModelConflictError, create_run, emit, question_json, question_snapshot_json, question_version_json
 
 settings = get_settings()
@@ -441,6 +441,28 @@ async def get_question_version(question_id: int, version_number: int, current_us
     if not version:
         raise HTTPException(404, "Not found")
     return question_version_json(version, include_snapshot=True)
+
+
+@app.get("/api/questions/{question_id}/navigation", response_model=QuestionNavigation)
+async def get_question_navigation(question_id: int, current_user: User = Depends(get_current_user), session: AsyncSession = Depends(get_session)) -> QuestionNavigation:
+    await get_visible_question(session, question_id, current_user)
+    scope = question_scope(current_user)
+    previous = await session.scalar(
+        select(Question)
+        .where(scope, Question.id < question_id)
+        .order_by(Question.id.desc())
+        .limit(1)
+    )
+    next_question = await session.scalar(
+        select(Question)
+        .where(scope, Question.id > question_id)
+        .order_by(Question.id.asc())
+        .limit(1)
+    )
+    return QuestionNavigation(
+        previous=QuestionNavigationItem(id=previous.id, title=previous.title) if previous else None,
+        next=QuestionNavigationItem(id=next_question.id, title=next_question.title) if next_question else None,
+    )
 
 
 @app.get("/api/questions/{question_id}")
