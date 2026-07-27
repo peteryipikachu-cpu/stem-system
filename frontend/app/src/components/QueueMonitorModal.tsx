@@ -264,7 +264,16 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     { title: "阶段", dataIndex: "stage", width: 105 },
     { title: "Provider", dataIndex: "provider", width: 90 },
     { title: "状态", dataIndex: "status", width: 110, render: workStatusTag },
-    { title: "结果摘要", dataIndex: "resultPreview", width: 300, render: (value: string | null) => value ? <Text ellipsis={{ tooltip: value }}>{value}</Text> : "-" },
+    {
+      title: "结果摘要",
+      dataIndex: "resultPreview",
+      width: 360,
+      render: (value: string | null) => value ? (
+        <Text style={{ display: "block", whiteSpace: "normal", overflowWrap: "anywhere", wordBreak: "break-word" }}>
+          {value}
+        </Text>
+      ) : "-",
+    },
     { title: "重试", dataIndex: "attemptNo", width: 75, render: (value: number) => `${value} 次` },
     { title: "可执行时间", dataIndex: "availableAt", width: 175, render: formatDate },
     { title: "执行占用截至", dataIndex: "leaseExpiresAt", width: 175, render: formatDate },
@@ -342,7 +351,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
       <Table<QueueRun>
         rowKey="id" loading={isLoading} columns={columns} dataSource={data?.items || []} scroll={{ x: 1735 }}
         expandable={{
-          expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} columns={workColumns} dataSource={[...run.workItems].sort((left, right) => (left.status === "completed" ? -1 : 0) - (right.status === "completed" ? -1 : 0) || left.attemptNo - right.attemptNo)} scroll={{ x: 1665 }} />,
+          expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} tableLayout="fixed" columns={workColumns} dataSource={[...run.workItems].sort((left, right) => (left.status === "completed" ? -1 : 0) - (right.status === "completed" ? -1 : 0) || left.attemptNo - right.attemptNo)} scroll={{ x: 1800 }} />,
           rowExpandable: (run) => run.workItems.length > 0,
         }}
         pagination={{
