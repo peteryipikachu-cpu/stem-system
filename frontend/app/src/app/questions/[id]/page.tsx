@@ -519,7 +519,9 @@ export default function QuestionDetailPage() {
         if (!initialized) {
           initialized = true;
           const types = run.checkTypes.length ? run.checkTypes : requestedTypes;
-          setCheckingTypes(new Set(types));
+          // 同一题可同时存在多个不重叠的审核任务；不能让后一个轮询
+          // 覆盖前一个任务的检查项，否则已在执行的答案校验会丢失进度。
+          setCheckingTypes((previous) => new Set([...previous, ...types]));
         }
         setCheckProgress((previous) => {
           const next = { ...previous };
@@ -713,10 +715,12 @@ export default function QuestionDetailPage() {
     );
   }
 
-  // 页面刷新时本地状态为空；直接由持久化的活动任务派生状态，直到 SSE 回放接管。
-  const recoveredCheckingTypes = checkingTypes.size === 0 && Object.keys(checkProgress).length === 0
-    ? new Set(activeRuns.flatMap((run) => run.checkTypes))
-    : checkingTypes;
+  // 页面刷新时本地状态为空；也可能有多个监控回调并发初始化。
+  // 始终将持久化活动任务与本地状态合并，避免一个任务覆盖另一个任务的进度。
+  const recoveredCheckingTypes = new Set([
+    ...checkingTypes,
+    ...activeRuns.flatMap((run) => run.checkTypes),
+  ]);
   const recoveredProgress = activeRuns.some((run) => run.status === "running") ? "检测中" : "排队中";
   const currentRunProgress = activeRuns.flatMap((run) => activeRunProgress[run.id] || run.progress || []);
 
