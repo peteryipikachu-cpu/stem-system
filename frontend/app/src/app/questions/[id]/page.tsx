@@ -102,6 +102,15 @@ function finalAnswerOnly(response: string): string {
   return candidate.split(/\n\s*\n/)[0].trim() || "(空回复)";
 }
 
+function formatElapsedMs(value?: number): string {
+  const milliseconds = Number(value || 0);
+  if (milliseconds < 1_000) return `${Math.max(0, Math.round(milliseconds))}ms`;
+  const seconds = Math.floor(milliseconds / 1_000);
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes} 分 ${seconds % 60} 秒`;
+}
+
 function CheckProgressContent({ progress }: { progress?: ActiveCheckProgress }) {
   if (!progress || progress.total <= 0) return null;
 
@@ -116,7 +125,18 @@ function CheckProgressContent({ progress }: { progress?: ActiveCheckProgress }) 
         {progress.solveRunning > 0 && <Tag>执行中 {progress.solveRunning}</Tag>}
         {progress.queued > 0 && <Tag>排队中 {progress.queued}</Tag>}
         {progress.waitingForResult && <Tag color="default">等待结果判断</Tag>}
+        {progress.elapsedMs ? <Tag color="default">已执行 {formatElapsedMs(progress.elapsedMs)}</Tag> : null}
+        {progress.checkType === "synthesis" && progress.model && <Tag color="blue">检测模型 {auditModelLabel(progress.model)}</Tag>}
+        {progress.stream && progress.stream.receivedChunks > 0 && (
+          <Tag color="cyan">流式 {progress.stream.receivedChunks} 片段 · 正文 {progress.stream.contentChars} 字{progress.stream.reasoningChars > 0 ? ` · 思考 ${progress.stream.reasoningChars} 字` : ""}</Tag>
+        )}
       </Space>
+      {progress.stream?.lastHeartbeatAt && (
+        <Text type="secondary" style={{ display: "block", marginTop: 6, fontSize: 12 }}>
+          最近心跳：{new Date(progress.stream.lastHeartbeatAt).toLocaleTimeString("zh-CN", { hour12: false })}
+          {progress.stream.lastChunkAt ? ` · 最近流式片段：${new Date(progress.stream.lastChunkAt).toLocaleTimeString("zh-CN", { hour12: false })}` : ""}
+        </Text>
+      )}
       {progress.completedAnswers.length > 0 && (
         <div style={{ marginTop: 8 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>已完成作答：</Text>
@@ -144,11 +164,19 @@ function CheckResultCard({ cr, onRecheck, duration, progress, readOnly = false }
 
   const label = CHECK_TYPE_LABELS[cr.checkType as CheckType] || cr.checkType;
   const modelLabel = auditModelLabel(detail.model as { label?: unknown; id?: unknown });
+  const persistedDuration = Number(detail.elapsedMs);
+  const displayDuration = duration ?? (Number.isFinite(persistedDuration) && persistedDuration > 0 ? persistedDuration : undefined);
+  const showsAuditDuration = ["difficulty", "answer", "synthesis"].includes(cr.checkType);
 
   const renderDetail = () => {
     const partial = Boolean(detail.partial);
     if (cr.result === "manual_review" && !partial) {
-      return <Alert type="warning" title="已转人工复核" description={String(detail.message || "模型调用未完成，请由人工处理该审核项。")} />;
+      return (
+        <Space orientation="vertical" style={{ width: "100%" }}>
+          {cr.checkType === "synthesis" && <Text>检测模型：{modelLabel}</Text>}
+          <Alert type="warning" title="已转人工复核" description={String(detail.message || "模型调用未完成，请由人工处理该审核项。")} />
+        </Space>
+      );
     }
     if (detail.error) {
       return <Alert type="error" title={String(detail.error)} />;
@@ -286,6 +314,7 @@ function CheckResultCard({ cr, onRecheck, duration, progress, readOnly = false }
 
       return (
         <Space orientation="vertical" style={{ width: "100%" }}>
+          <Text>检测模型：{modelLabel}</Text>
           <Text>是否疑似 AI 生成题：<Text strong style={{ color: detail.isSynthetic ? "#ff4d4f" : "#52c41a" }}>{detail.isSynthetic ? "是" : "否"}</Text>，置信度：<Text strong>{Number(detail.confidence ?? 0)}%</Text></Text>
           {ruleViolations.length > 0 && (
             <Alert type="warning" title={ruleViolations.join("；")} />
@@ -312,8 +341,8 @@ function CheckResultCard({ cr, onRecheck, duration, progress, readOnly = false }
           <Text strong>{label}</Text>
           <ResultTag result={cr.result} />
           {progress && <Tag color="processing"><SyncOutlined spin /> 检测中</Tag>}
-          {duration !== undefined && (
-            <Tag color="default" style={{ fontSize: 11 }}>{(duration / 1000).toFixed(1)}s</Tag>
+          {showsAuditDuration && displayDuration !== undefined && (
+            <Tag color="default" style={{ fontSize: 11 }}>检测耗时 {formatElapsedMs(displayDuration)}</Tag>
           )}
         </Space>
       }

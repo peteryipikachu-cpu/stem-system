@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     worker_heartbeat_ttl_seconds: int = 15
     # 豆包深度思考可能持续数十分钟；租约必须覆盖最长的供应商读取超时。
     lease_seconds: int = 3_900
+    # 工作项执行期间持续刷新租约；流式响应到达时则额外写入片段观测。
+    ai_work_lease_heartbeat_seconds: int = 30
+    ai_stream_observation_interval_seconds: int = 2
     poll_interval_ms: int = 500
     ai_queue_max_wait_ms: int = 900_000
     # 通用供应商（例如 Gemini）的读取超时。

@@ -126,7 +126,7 @@ async def test_doubao_solve_uses_final_answer_format_without_max_tokens(monkeypa
     request_bodies = []
     stream_flags = []
 
-    async def fake_call_chat(_, __, ___, body, stream=False):
+    async def fake_call_chat(_, __, ___, body, stream=False, on_stream_chunk=None):
         request_bodies.append(body)
         stream_flags.append(stream)
         return "YES", {"usage": {}}
@@ -169,18 +169,30 @@ async def test_streaming_call_requests_sse_and_accumulates_content() -> None:
             ),
         )
 
+    observations = []
+
+    async def observe(chunk):
+        observations.append(chunk)
+
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        content, raw = await call_chat(client, "https://example.test/v1", "test-key", {"model": "doubao"}, stream=True)
+        content, raw = await call_chat(
+            client, "https://example.test/v1", "test-key", {"model": "doubao"}, stream=True,
+            on_stream_chunk=observe,
+        )
 
     assert content == "3/16"
     assert raw["choices"][0]["message"]["content"] == "3/16"
+    assert observations == [
+        {"receivedChunks": 1, "contentChars": 1, "reasoningChars": 0},
+        {"receivedChunks": 1, "contentChars": 3, "reasoningChars": 0},
+    ]
 
 
 @pytest.mark.asyncio
 async def test_difficulty_solve_requests_only_the_final_answer(monkeypatch) -> None:
     request_bodies = []
 
-    async def fake_call_chat(_, __, ___, body, stream=False):
+    async def fake_call_chat(_, __, ___, body, stream=False, on_stream_chunk=None):
         request_bodies.append(body)
         return "42", {"usage": {}}
 

@@ -17,6 +17,16 @@ export interface ActiveCheckProgress {
   solveRunning: number;
   waitingForResult: boolean;
   completedAnswers: Array<{ attempt: number; answer: string }>;
+  elapsedMs?: number;
+  model?: { id?: string; label?: string; provider?: string; passK?: number; difficultyThreshold?: number } | null;
+  stream?: {
+    activeWorkCount: number;
+    receivedChunks: number;
+    contentChars: number;
+    reasoningChars: number;
+    lastChunkAt: string | null;
+    lastHeartbeatAt: string | null;
+  } | null;
 }
 
 export interface BatchAccepted {

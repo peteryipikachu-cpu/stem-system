@@ -81,6 +81,12 @@ def test_run_progress_returns_completed_answers_before_final_judgement() -> None
         "checkType": "difficulty", "total": 4, "completed": 2, "running": 1, "queued": 0, "blocked": 1,
         "solveTotal": 3, "solveCompleted": 2, "solveRunning": 1, "waitingForResult": True,
         "completedAnswers": [{"attempt": 1, "answer": "A"}, {"attempt": 2, "answer": "B"}],
+        "elapsedMs": 0,
+        "stream": {
+            "activeWorkCount": 1, "receivedChunks": 0, "contentChars": 0, "reasoningChars": 0,
+            "lastChunkAt": None, "lastHeartbeatAt": None,
+        },
+        "model": None,
     }]
 
 

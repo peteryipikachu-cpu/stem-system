@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 import json
 import random
 import re
@@ -16,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import Settings
+from .db import SessionLocal
 from .audit_models import AuditModel, get_audit_model, model_from_snapshot
 from .models import CheckBatch, CheckEvent, CheckResult, CheckRun, CheckWorkItem, Question, QuestionVersion
 from .queue import acquire, doubao_key_candidates, pop_ready as pop_ready_queue, provider_scope, release
@@ -419,7 +422,11 @@ def latex_check(text: str) -> dict[str, Any]:
     return {"errors": errors}
 
 
-async def call_chat(client: httpx.AsyncClient, base_url: str, api_key: Optional[str], body: dict[str, Any], stream: bool = False) -> Tuple[str, dict[str, Any]]:
+StreamObserver = Callable[[dict[str, int]], Awaitable[None]]
+
+
+async def call_chat(client: httpx.AsyncClient, base_url: str, api_key: Optional[str], body: dict[str, Any], stream: bool = False,
+                    on_stream_chunk: Optional[StreamObserver] = None) -> Tuple[str, dict[str, Any]]:
     if not api_key:
         raise ValueError("provider API key not configured")
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -445,7 +452,20 @@ async def call_chat(client: httpx.AsyncClient, base_url: str, api_key: Optional[
                 usage = chunk.get("usage") or usage
                 choices = chunk.get("choices") or []
                 if choices:
-                    content += choices[0].get("delta", {}).get("content", "") or ""
+                    delta = choices[0].get("delta", {}) or {}
+                    content_piece = delta.get("content", "") or ""
+                    reasoning_piece = delta.get("reasoning_content", delta.get("reasoning", "")) or ""
+                    content += content_piece
+                    if on_stream_chunk:
+                        try:
+                            await on_stream_chunk({
+                                "receivedChunks": 1,
+                                "contentChars": len(content_piece),
+                                "reasoningChars": len(reasoning_piece),
+                            })
+                        except Exception:
+                            # 可观测性写入不能让已建立的模型流失败。
+                            pass
             except json.JSONDecodeError:
                 continue
     return content, {"choices": [{"message": {"content": content}}], "usage": usage}
@@ -531,7 +551,7 @@ def parsed_equivalence_flags(content: str, expected_count: int) -> list[bool]:
 async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_key: Optional[str],
                              model: AuditModel, question_text: str, reference_answer: str, answers: list[str],
                              request_options: Optional[dict[str, Any]] = None,
-                             stream: bool = False) -> tuple[list[bool], dict[str, Any]]:
+                             stream: bool = False, on_stream_chunk: Optional[StreamObserver] = None) -> tuple[list[bool], dict[str, Any]]:
     """Return one verdict per answer, preserving canonical matches locally."""
     canonical_reference = normalized_math_answer(reference_answer)
     flags: list[Optional[bool]] = [
@@ -550,7 +570,7 @@ async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_ke
     }
     if request_options:
         request_body.update(request_options)
-    content, raw = await call_chat(client, base_url, api_key, request_body, stream=stream)
+    content, raw = await call_chat(client, base_url, api_key, request_body, stream=stream, on_stream_chunk=on_stream_chunk)
     parsed_flags = parsed_equivalence_flags(content, len(pending_answers))
     for index, flag in zip(pending_indexes, parsed_flags):
         flags[index] = flag
@@ -560,7 +580,8 @@ async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_ke
 
 
 async def execute_model(work: CheckWorkItem, question: Question, settings: Settings,
-                        doubao_api_key: Optional[str] = None) -> tuple[dict[str, Any], list[Any]]:
+                        doubao_api_key: Optional[str] = None,
+                        on_stream_chunk: Optional[StreamObserver] = None) -> tuple[dict[str, Any], list[Any]]:
     model = work_audit_model(work)
     read_timeout = settings.ai_doubao_read_timeout_seconds if work.provider == "doubao" else settings.ai_model_read_timeout_seconds
     timeout = httpx.Timeout(connect=30, read=read_timeout, write=30, pool=30)
@@ -574,6 +595,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                     question_text=question.question, reference_answer=question.answer, answers=answers,
                     request_options={"thinking": {"type": "disabled"}},
                     stream=True,
+                    on_stream_chunk=on_stream_chunk,
                 )
                 return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
             if work.stage == "synthesis":
@@ -594,6 +616,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                     api_key,
                     {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0},
                     stream=True,
+                    on_stream_chunk=on_stream_chunk,
                 )
                 return {"answer": content[:10000]}, [raw]
             # 难度校验只保留最终答案；答案比对阶段则在上方显式关闭思考。
@@ -604,7 +627,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 "thinking": {"type": "enabled"},
                 "reasoning": {"effort": "high"},
                 "temperature": 0,
-            }, stream=True)
+            }, stream=True, on_stream_chunk=on_stream_chunk)
             return {"answer": content[:10000]}, [raw]
         if work.provider == "gemini":
             api_key = settings.gemini_keys[0] if settings.gemini_keys else None
@@ -677,6 +700,13 @@ async def finalize_check(session: AsyncSession, redis: Redis, work: CheckWorkIte
         detail = {"model": model.snapshot(), "modelAnswer": answer[:300], "isCorrect": False, "confidence": 20}
         result = "pass"
         raws = [work.result]
+    started_times = [item.started_at for item in items if item.started_at]
+    finished_at = work.completed_at or utcnow()
+    if started_times:
+        # 以该检查项第一项开始至最终判断完成的墙钟时间展示给用户；并保留
+        # 工作项 CPU/网络累计时间，供运维分析并发与供应商耗时。
+        detail["elapsedMs"] = int(max(0, (finished_at - min(started_times)).total_seconds() * 1_000))
+    detail["executionMs"] = int(sum(item.execution_ms or 0 for item in items))
     existing = await session.scalar(select(CheckResult).where(CheckResult.question_id == question.id, CheckResult.check_type == work.check_type))
     if existing:
         existing.result, existing.detail, existing.raw_responses = result, detail, raws
@@ -804,6 +834,11 @@ async def mark_manual_review(session: AsyncSession, redis: Redis, work: CheckWor
         "message": message,
         "attempts": work.attempt_no,
     }
+    if work.check_type in {"difficulty", "answer", "synthesis"}:
+        detail["model"] = work_audit_model(work).snapshot()
+    if work.started_at:
+        detail["elapsedMs"] = int(max(0, (now - work.started_at).total_seconds() * 1_000))
+    detail["executionMs"] = int(work.execution_ms or 0)
     if work.stage == "equivalence" and work.check_type in {"difficulty", "answer"}:
         solve_items = (await session.scalars(select(CheckWorkItem).where(
             CheckWorkItem.run_id == work.run_id,
@@ -859,6 +894,67 @@ async def pop_ready(redis: Redis) -> Optional[str]:
     return None
 
 
+def _stream_observation(payload: dict[str, Any], now: datetime,
+                        snapshot: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Merge a monotonic stream snapshot into the persisted work payload."""
+    previous = payload.get("stream") if isinstance(payload.get("stream"), dict) else {}
+    observation: dict[str, Any] = {
+        "receivedChunks": int(previous.get("receivedChunks") or 0),
+        "contentChars": int(previous.get("contentChars") or 0),
+        "reasoningChars": int(previous.get("reasoningChars") or 0),
+        "startedAt": previous.get("startedAt") or now.isoformat(),
+        "lastChunkAt": previous.get("lastChunkAt"),
+    }
+    if snapshot:
+        for name in ("receivedChunks", "contentChars", "reasoningChars"):
+            observation[name] = max(observation[name], int(snapshot.get(name) or 0))
+        if snapshot.get("lastChunkAt"):
+            observation["lastChunkAt"] = snapshot["lastChunkAt"]
+    observation["lastHeartbeatAt"] = now.isoformat()
+    return observation
+
+
+async def refresh_running_work_lease(work_id: uuid.UUID, redis: Redis, settings: Settings,
+                                     stream_snapshot: Optional[dict[str, Any]] = None) -> bool:
+    """Persist a model-call heartbeat without sharing the Worker transaction.
+
+    External model calls can take a long time, especially when deep reasoning is
+    enabled. A short independent transaction both extends the lease and exposes
+    stream activity to the detail page and queue monitor.
+    """
+    async with SessionLocal() as heartbeat_session:
+        async with heartbeat_session.begin():
+            work = await heartbeat_session.get(CheckWorkItem, work_id, with_for_update=True)
+            if not work or work.status != "running":
+                return False
+            now = utcnow()
+            payload = dict(work.payload or {})
+            stream = _stream_observation(payload, now, stream_snapshot)
+            payload["stream"] = stream
+            work.payload = payload
+            work.lease_expires_at = now + timedelta(seconds=settings.lease_seconds)
+            elapsed_ms = int(max(0, (now - work.started_at).total_seconds() * 1_000)) if work.started_at else 0
+            await emit(heartbeat_session, redis, work.run_id, "progress", {
+                "questionId": work.question_id,
+                "checkType": work.check_type,
+                "status": "running",
+                "provider": work.provider,
+                "stage": work.stage,
+                "elapsedMs": elapsed_ms,
+                "stream": stream,
+            })
+    return True
+
+
+async def _stop_lease_heartbeat(task: Optional[asyncio.Task[None]], stop: Optional[asyncio.Event]) -> None:
+    if stop:
+        stop.set()
+    if task:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+
 async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, interactive_budget: int = 3) -> int:
     del interactive_budget
     work_id = await pop_ready(redis)
@@ -869,6 +965,8 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
     stage = "check"
     rate_limit_scope = provider
     doubao_api_key: Optional[str] = None
+    lease_heartbeat_task: Optional[asyncio.Task[None]] = None
+    lease_heartbeat_stop: Optional[asyncio.Event] = None
     try:
         work = await session.get(CheckWorkItem, uuid.UUID(work_id), with_for_update=True)
         if not work or work.status != "queued":
@@ -934,6 +1032,10 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
         work.started_at = work.started_at or utcnow()
         work.lease_owner = settings.worker_id
         work.lease_expires_at = utcnow() + timedelta(seconds=settings.lease_seconds)
+        work.payload = {
+            **(work.payload or {}),
+            "stream": _stream_observation(dict(work.payload or {}), utcnow()),
+        }
         run = await session.get(CheckRun, work.run_id)
         question = await session.get(Question, work.question_id)
         if run and run.status == "queued":
@@ -957,15 +1059,52 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
 
         # External model work is deliberately outside a PostgreSQL transaction.
         execution_started = time.perf_counter()
-        if stage == "check":
-            result: dict[str, Any] = latex_check(f"{question.question}\\n{question.answer}")
-        else:
-            result, raw_responses = await execute_model(work, question, settings, doubao_api_key)
-            if raw_responses and isinstance(raw_responses[-1], dict):
-                usage = raw_responses[-1].get("usage")
-                if isinstance(usage, dict):
-                    # 每个工作项都保留上游返回的 token 用量，便于成本归因和压测统计。
-                    result["usage"] = usage
+        stream_counters = {"receivedChunks": 0, "contentChars": 0, "reasoningChars": 0}
+        last_stream_write = 0.0
+
+        async def observe_stream(chunk: dict[str, int]) -> None:
+            nonlocal last_stream_write
+            for name in stream_counters:
+                stream_counters[name] += int(chunk.get(name) or 0)
+            now = time.monotonic()
+            if now - last_stream_write < settings.ai_stream_observation_interval_seconds:
+                return
+            last_stream_write = now
+            await refresh_running_work_lease(
+                uuid.UUID(work_id), redis, settings,
+                {**stream_counters, "lastChunkAt": utcnow().isoformat()},
+            )
+
+        async def renew_lease_until_finished() -> None:
+            while True:
+                try:
+                    assert lease_heartbeat_stop is not None
+                    await asyncio.wait_for(
+                        lease_heartbeat_stop.wait(),
+                        timeout=max(1, settings.ai_work_lease_heartbeat_seconds),
+                    )
+                    return
+                except asyncio.TimeoutError:
+                    await refresh_running_work_lease(uuid.UUID(work_id), redis, settings)
+
+        lease_heartbeat_stop = asyncio.Event()
+        lease_heartbeat_task = asyncio.create_task(renew_lease_until_finished())
+        try:
+            if stage == "check":
+                result: dict[str, Any] = latex_check(f"{question.question}\\n{question.answer}")
+            else:
+                result, raw_responses = await execute_model(
+                    work, question, settings, doubao_api_key, on_stream_chunk=observe_stream,
+                )
+                if raw_responses and isinstance(raw_responses[-1], dict):
+                    usage = raw_responses[-1].get("usage")
+                    if isinstance(usage, dict):
+                        # 每个工作项都保留上游返回的 token 用量，便于成本归因和压测统计。
+                        result["usage"] = usage
+        finally:
+            await _stop_lease_heartbeat(lease_heartbeat_task, lease_heartbeat_stop)
+            lease_heartbeat_task = None
+            lease_heartbeat_stop = None
         execution_ms = (time.perf_counter() - execution_started) * 1_000
 
         async with session.begin():
@@ -1023,6 +1162,7 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
                 if run:
                     await complete_run_if_ready(session, redis, run)
     finally:
+        await _stop_lease_heartbeat(lease_heartbeat_task, lease_heartbeat_stop)
         if acquired:
             await release(redis, settings, provider, stage, rate_limit_scope)
     return 1

@@ -51,6 +51,14 @@ interface QueueWorkItem {
   errorCode: string | null;
   errorStatusCode: number | null;
   resultPreview: string | null;
+  elapsedMs: number;
+  stream: {
+    receivedChunks: number;
+    contentChars: number;
+    reasoningChars: number;
+    lastChunkAt: string | null;
+    lastHeartbeatAt: string | null;
+  } | null;
 }
 
 interface QueueRun {
@@ -133,6 +141,11 @@ function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds} 秒`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟`;
   return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分钟`;
+}
+
+function formatElapsedMs(milliseconds: number): string {
+  if (!milliseconds) return "0 秒";
+  return formatDuration(Math.floor(milliseconds / 1_000));
 }
 
 function healthTag(health: QueueHealth, label: string) {
@@ -256,6 +269,20 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
     { title: "可执行时间", dataIndex: "availableAt", width: 175, render: formatDate },
     { title: "执行占用截至", dataIndex: "leaseExpiresAt", width: 175, render: formatDate },
     {
+      title: "流式片段 / 心跳", width: 230,
+      render: (_, item) => item.status === "running" ? (
+        <Space orientation="vertical" size={0}>
+          <Text>{formatElapsedMs(item.elapsedMs)} · {item.stream?.receivedChunks || 0} 片段</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {item.stream?.lastChunkAt ? `最近片段 ${formatDate(item.stream.lastChunkAt)}` : "尚未收到正文片段"}
+          </Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {item.stream?.lastHeartbeatAt ? `心跳 ${formatDate(item.stream.lastHeartbeatAt)}` : "等待首次心跳"}
+          </Text>
+        </Space>
+      ) : "-",
+    },
+    {
       title: "错误摘要", width: 280,
       render: (_, item) => item.error ? <Text type="danger" ellipsis={{ tooltip: item.error }}>{item.errorCode ? `${item.errorCode}: ${item.error}` : item.error}</Text> : "-",
     },
@@ -315,7 +342,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
       <Table<QueueRun>
         rowKey="id" loading={isLoading} columns={columns} dataSource={data?.items || []} scroll={{ x: 1735 }}
         expandable={{
-          expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} columns={workColumns} dataSource={[...run.workItems].sort((left, right) => (left.status === "completed" ? -1 : 0) - (right.status === "completed" ? -1 : 0) || left.attemptNo - right.attemptNo)} scroll={{ x: 1430 }} />,
+          expandedRowRender: (run) => <Table<QueueWorkItem> rowKey="id" size="small" pagination={false} columns={workColumns} dataSource={[...run.workItems].sort((left, right) => (left.status === "completed" ? -1 : 0) - (right.status === "completed" ? -1 : 0) || left.attemptNo - right.attemptNo)} scroll={{ x: 1665 }} />,
           rowExpandable: (run) => run.workItems.length > 0,
         }}
         pagination={{

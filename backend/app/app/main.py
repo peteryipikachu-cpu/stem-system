@@ -133,6 +133,10 @@ def _queue_user_view(user: Optional[User]) -> Optional[dict[str, Any]]:
 
 def _work_item_view(work: CheckWorkItem) -> dict[str, Any]:
     answer = (work.result or {}).get("answer") if isinstance(work.result, dict) else None
+    payload = work.payload if isinstance(work.payload, dict) else {}
+    stream = payload.get("stream") if isinstance(payload.get("stream"), dict) else None
+    now = datetime.now(timezone.utc)
+    elapsed_ms = int(max(0, (now - work.started_at).total_seconds() * 1_000)) if work.status == "running" and work.started_at else int(work.execution_ms or 0)
     return {
         "id": str(work.id), "checkType": work.check_type, "stage": work.stage,
         "provider": work.provider, "status": work.status, "attemptNo": work.attempt_no,
@@ -142,6 +146,8 @@ def _work_item_view(work: CheckWorkItem) -> dict[str, Any]:
         "leaseExpiresAt": _iso(work.lease_expires_at), "error": work.error,
         "errorCode": work.error_code, "errorStatusCode": work.error_status_code,
         "resultPreview": str(answer)[:500] if answer else None,
+        "elapsedMs": elapsed_ms,
+        "stream": stream,
     }
 
 
@@ -550,18 +556,35 @@ async def start_batch(payload: BatchCheckRequest, current_user: User = Depends(g
     return {"batchId": batch.id, "runIds": [item.id for item in runs], "status": batch.status, "deadlineAt": batch.deadline_at}
 
 
-def run_progress_view(works: list[CheckWorkItem]) -> list[dict[str, Any]]:
+def run_progress_view(works: list[CheckWorkItem], model: Optional[dict[str, Any]] = None) -> list[dict[str, Any]]:
     """Summarize active work without waiting for the final equivalence stage."""
     by_type: dict[str, list[CheckWorkItem]] = {}
     for work in works:
         by_type.setdefault(work.check_type, []).append(work)
     progress: list[dict[str, Any]] = []
+    now = datetime.now(timezone.utc)
     for check_type, type_works in by_type.items():
         solves = sorted((work for work in type_works if work.stage == "solve"), key=lambda work: work.attempt)
         completed_answers = [
             {"attempt": work.attempt, "answer": str((work.result or {}).get("answer", ""))[:4_000]}
             for work in solves if work.status == "completed" and (work.result or {}).get("answer")
         ]
+        active_works = [work for work in type_works if work.status == "running"]
+        stream_observations = [
+            (work.payload or {}).get("stream", {})
+            for work in active_works if isinstance((work.payload or {}).get("stream"), dict)
+        ]
+        last_chunk_times = [item.get("lastChunkAt") for item in stream_observations if item.get("lastChunkAt")]
+        last_heartbeat_times = [item.get("lastHeartbeatAt") for item in stream_observations if item.get("lastHeartbeatAt")]
+        started_times = [work.started_at for work in active_works if work.started_at]
+        stream = {
+            "activeWorkCount": len(active_works),
+            "receivedChunks": sum(int(item.get("receivedChunks") or 0) for item in stream_observations),
+            "contentChars": sum(int(item.get("contentChars") or 0) for item in stream_observations),
+            "reasoningChars": sum(int(item.get("reasoningChars") or 0) for item in stream_observations),
+            "lastChunkAt": max(last_chunk_times) if last_chunk_times else None,
+            "lastHeartbeatAt": max(last_heartbeat_times) if last_heartbeat_times else None,
+        }
         progress.append({
             "checkType": check_type,
             "total": len(type_works),
@@ -574,6 +597,9 @@ def run_progress_view(works: list[CheckWorkItem]) -> list[dict[str, Any]]:
             "solveRunning": sum(work.status == "running" for work in solves),
             "waitingForResult": any(work.stage == "equivalence" and work.status == "blocked" for work in type_works),
             "completedAnswers": completed_answers,
+            "elapsedMs": int(max(0, (now - min(started_times)).total_seconds() * 1_000)) if started_times else 0,
+            "stream": stream,
+            "model": model,
         })
     return progress
 
@@ -587,7 +613,7 @@ async def run_view(session: AsyncSession, run: CheckRun) -> dict[str, Any]:
         "model": run.model_versions or get_audit_model().snapshot(),
         "createdAt": run.created_at.isoformat(), "startedAt": run.started_at.isoformat() if run.started_at else None,
         "completedAt": run.completed_at.isoformat() if run.completed_at else None,
-        "progress": run_progress_view(works)}
+        "progress": run_progress_view(works, run.model_versions or get_audit_model().snapshot())}
 
 
 @app.get("/api/check-runs/{run_id}")
