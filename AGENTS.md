@@ -40,6 +40,21 @@ This version has breaking changes — APIs, conventions, and file structure may 
 
 ## 本地开发
 
+### 当前本机启动方式（不使用 Docker）
+
+本仓库由三个彼此独立的 Git 仓库组成，实际可执行代码分别位于：
+
+| 组件 | 目录 | 启动命令 |
+| --- | --- | --- |
+| 前端 | `stem-system-frontend/app` | `npm run dev -- --hostname 127.0.0.1 --port 3000` |
+| 后端 API | `stem-system-backend/app` | `env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000` |
+| Worker | `stem-system-worker/app` | `env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/python -m app.worker` |
+
+- 本项目日常本机调试**不使用 Docker**，前端固定使用 `3000` 端口；如端口已被占用，应先确认并停止原有进程，不要改为 `3001`。
+- 启动顺序为：后端 API、Worker、前端；三项分别在独立终端运行。前端访问地址为 `http://127.0.0.1:3000`，后端文档为 `http://127.0.0.1:8000/docs`。
+- 后端和 Worker 使用 Conda 的 `/opt/anaconda3/bin/python` 及本机 PostgreSQL 数据库 `stem`、本机 Redis。API Key 仅从各组件本地忽略的环境变量文件读取，禁止写入命令、代码、日志或提交。
+- 每次启动或重启前，先确认 `3000`、`8000` 端口和 Redis/PostgreSQL 的实际状态；停止服务时在对应终端使用 `Ctrl+C`，不要误杀无关进程。
+
 ### 依赖与服务
 
 ```bash
@@ -68,6 +83,22 @@ ruff check .
 ```
 
 单独运行时，按实际数据库和 Redis 地址设置 `DATABASE_URL`、`REDIS_URL` 等环境变量。容器默认地址中的 `postgres`、`redis` 主机名不能直接用于宿主机。
+
+### 代码提交与推送（三个独立 GitLab 仓库）
+
+- `stem-system-frontend/app`、`stem-system-backend/app`、`stem-system-worker/app` 均是独立仓库，分别提交和推送；它们的 `origin` 指向各自的 GitLab 仓库，默认分支为 `main`。
+- 提交前必须进入对应组件目录并检查变更：
+
+  ```bash
+  git status --short
+  git add <本次明确需要提交的文件>
+  git commit -m "中文提交说明"
+  git push origin main
+  ```
+
+- 后端的 `reports/` 只保留在本机，**不得提交**；后端提交时必须逐个列出文件 `git add`，不要使用 `git add .` 或 `git add -A`。同样不得提交 `.env*`、密钥、Cookie、数据库导出、构建缓存或其他用户已有的无关改动。
+- 推送是外部状态变更：确认目标仓库和分支后才可执行，失败时保留本地提交并报告原因；不得使用 `--force`、不得修改三个 GitLab 仓库的远程地址。
+- 根目录的 GitHub 聚合仓库与上述三个 GitLab 仓库相互独立。除非用户明确要求同步聚合仓库，否则不要新增子模块、不要调整内层仓库远程，也不要向 GitHub 聚合仓库提交或推送。
 
 ## 实现约定
 
