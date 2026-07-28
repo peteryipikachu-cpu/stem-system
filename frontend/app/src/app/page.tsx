@@ -546,6 +546,16 @@ export default function HomePage() {
       render: (_: unknown, record: Question) => <Tag color="blue">v{record.currentVersion || 1}</Tag>,
     },
     {
+      title: "标题",
+      dataIndex: "title",
+      width: 180,
+      ellipsis: true,
+      render: (value: string, record: Question) => {
+        const title = value || `题目 #${record.id}`;
+        return <Text ellipsis={{ tooltip: title }}>{title}</Text>;
+      },
+    },
+    {
       title: "题目类型",
       dataIndex: "type",
       width: 90,
@@ -917,7 +927,7 @@ export default function HomePage() {
             rowKey="id"
             rowSelection={rowSelection}
             loading={isLoading}
-            scroll={{ x: 1800 }}
+            scroll={{ x: 1980 }}
             expandable={{
               rowExpandable: (record) => record.versionCount > 1,
               onExpand: (expanded, record) => {
