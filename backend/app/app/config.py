@@ -30,10 +30,14 @@ class Settings(BaseSettings):
     ai_limit_gemini_concurrency: int = 2
     ai_limit_gemini_answer_concurrency: int = 2
     ai_limit_gemini_synthesis_concurrency: int = 1
+    ai_limit_apiroute_concurrency: int = 3
+    ai_limit_apiroute_lane_concurrency: int = 2
     ai_limit_doubao_rpm: int = 0
     ai_limit_doubao_tpm: int = 0
     ai_limit_gemini_rpm: int = 0
     ai_limit_gemini_tpm: int = 0
+    ai_limit_apiroute_rpm: int = 0
+    ai_limit_apiroute_tpm: int = 0
     provider_circuit_failure_threshold: int = 3
     provider_circuit_window_seconds: int = 300
     provider_circuit_open_seconds: int = 300
@@ -46,6 +50,7 @@ class Settings(BaseSettings):
     # Generic APIRoute pool. The same gateway keys work for Doubao and Gemini.
     apiroute_api_keys: str = ""
     apiroute_api_key: Optional[str] = None
+    apiroute_base_url: str = "https://apiroute.bodenai.net/v1"
     # APIRoute exposes the Doubao model through an OpenAI-compatible API.
     doubao_model: str = "doubao-seed-2-0-pro-260215"
     doubao_base_url: str = "https://apiroute.bodenai.net/v1"
@@ -78,6 +83,11 @@ class Settings(BaseSettings):
     @property
     def apiroute_keys(self) -> list[str]:
         return self._keys(self.apiroute_api_keys, self.apiroute_api_key)
+
+    @property
+    def shared_apiroute_keys(self) -> list[str]:
+        # 兼容早期仅将 APIRoute 共享 Key 写在 DOUBAO_API_KEYS 的部署。
+        return list(dict.fromkeys([*self.apiroute_keys, *self.doubao_keys]))
 
     @field_validator("database_url")
     @classmethod

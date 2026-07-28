@@ -1,6 +1,6 @@
-from __future__ import annotations
-
 """Redis-coordinated global quotas and durable-queue acceleration."""
+
+from __future__ import annotations
 from dataclasses import dataclass
 from redis.asyncio import Redis
 from .config import Settings
@@ -94,6 +94,8 @@ def provider_limit(settings: Settings, provider: str, stage: str) -> ProviderLim
     if provider == "gemini":
         lane = "synthesis" if stage == "synthesis" else "answer"
         return ProviderLimit(settings.ai_limit_gemini_concurrency, settings.ai_limit_gemini_synthesis_concurrency if lane == "synthesis" else settings.ai_limit_gemini_answer_concurrency, lane, settings.ai_limit_gemini_rpm, settings.ai_limit_gemini_tpm)
+    if provider == "apiroute":
+        return ProviderLimit(settings.ai_limit_apiroute_concurrency, settings.ai_limit_apiroute_lane_concurrency, "model", settings.ai_limit_apiroute_rpm, settings.ai_limit_apiroute_tpm)
     return ProviderLimit(settings.ai_limit_rule_concurrency, settings.ai_limit_rule_concurrency, "default", 0, 0)
 
 

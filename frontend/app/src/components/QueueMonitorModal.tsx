@@ -317,7 +317,7 @@ export default function QueueMonitorModal({ open, onClose }: QueueMonitorModalPr
             { value: "attention", label: "需关注" }, { value: "stuck", label: "卡住" },
           ]} />
           <Select value={provider} onChange={(value) => { setProvider(value); setPage(1); }} allowClear placeholder="全部 Provider" style={{ width: 145 }} options={[
-            { value: "doubao", label: "Doubao" }, { value: "gemini", label: "Gemini" }, { value: "rule", label: "本地规则" },
+            { value: "doubao", label: "Doubao" }, { value: "gemini", label: "Gemini" }, { value: "apiroute", label: "APIRoute" }, { value: "rule", label: "本地规则" },
           ]} />
         </Space>
         <Space>

@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 import app.main as main
+from app.audit_models import get_audit_model
 from app.config import Settings
 from app.models import CheckRun
 from app.queue import provider_limit
@@ -38,6 +39,23 @@ def test_stable_default_provider_limits_match_capacity_plan() -> None:
     assert (deep.total_concurrency, deep.lane_concurrency) == (3, 2)
     assert (fast.total_concurrency, fast.lane_concurrency) == (3, 1)
     assert (gemini.total_concurrency, gemini.lane_concurrency) == (2, 2)
+
+
+@pytest.mark.parametrize("model_id", ["glm-5.2", "qwen3.7-max", "kimi-k3"])
+def test_apiroute_models_have_three_passes_and_difficulty_threshold_two(model_id: str) -> None:
+    model = get_audit_model(model_id)
+
+    assert model.provider == "apiroute"
+    assert model.pass_k == 3
+    assert model.difficulty_threshold == 2
+
+
+def test_apiroute_provider_has_dedicated_capacity_lane() -> None:
+    settings = Settings(ai_limit_apiroute_concurrency=3, ai_limit_apiroute_lane_concurrency=2)
+
+    limit = provider_limit(settings, "apiroute", "solve")
+
+    assert (limit.total_concurrency, limit.lane_concurrency, limit.lane) == (3, 2, "model")
 
 
 def test_deep_inference_timeout_is_covered_by_worker_lease() -> None:

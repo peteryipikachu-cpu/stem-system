@@ -96,6 +96,8 @@ def provider_limit(settings: Settings, provider: str, stage: str) -> ProviderLim
     if provider == "gemini":
         lane = "synthesis" if stage == "synthesis" else "answer"
         return ProviderLimit(settings.ai_limit_gemini_concurrency, settings.ai_limit_gemini_synthesis_concurrency if lane == "synthesis" else settings.ai_limit_gemini_answer_concurrency, lane, settings.ai_limit_gemini_rpm, settings.ai_limit_gemini_tpm)
+    if provider == "apiroute":
+        return ProviderLimit(settings.ai_limit_apiroute_concurrency, settings.ai_limit_apiroute_lane_concurrency, "model", settings.ai_limit_apiroute_rpm, settings.ai_limit_apiroute_tpm)
     return ProviderLimit(settings.ai_limit_rule_concurrency, settings.ai_limit_rule_concurrency, "default", 0, 0)
 
 
@@ -107,10 +109,14 @@ def provider_scope(provider: str, api_key: str | None = None) -> str:
 
 
 async def doubao_key_candidates(redis: Redis, settings: Settings) -> list[str]:
-    keys = settings.doubao_keys
+    return await provider_key_candidates(redis, settings, "doubao")
+
+
+async def provider_key_candidates(redis: Redis, settings: Settings, provider: str) -> list[str]:
+    keys = settings.doubao_keys if provider == "doubao" else settings.shared_apiroute_keys
     if not keys:
         return []
-    cursor = int(await redis.incr("stem:limit:doubao:key-cursor"))
+    cursor = int(await redis.incr(f"stem:limit:{provider}:key-cursor"))
     start = cursor % len(keys)
     return [keys[(start + offset) % len(keys)] for offset in range(len(keys))]
 

@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from app.config import Settings
+from app.audit_models import get_audit_model
 from app.models import CheckRun, CheckWorkItem, Question
 from app.queue import provider_limit, provider_scope
 from app.services import (
@@ -27,6 +28,20 @@ def test_full_check_creates_model_specific_work_items_with_batch_owner() -> None
     assert sum(item.provider == "gemini" for item in items) == 0
     assert sum(item.provider == "rule" for item in items) == 1
     assert {item.queue_owner_id for item in items} == {7}
+
+
+@pytest.mark.parametrize("model_id", ["glm-5.2", "qwen3.7-max", "kimi-k3"])
+def test_apiroute_models_use_three_passes_and_shared_provider(model_id: str) -> None:
+    model = get_audit_model(model_id)
+    run = CheckRun(id=uuid.uuid4(), question_id=42, priority="interactive", prompt_version="v1", model_versions=model.snapshot())
+
+    items = make_check_work_items(run, ["difficulty"], queue_owner_id=0)
+
+    assert model.pass_k == 3
+    assert model.difficulty_threshold == 2
+    assert [item.stage for item in items] == ["solve", "solve", "solve", "equivalence"]
+    assert {item.provider for item in items} == {"apiroute"}
+    assert all(item.payload["model"]["id"] == model_id for item in items)
 
 
 def test_stable_default_provider_limits_match_capacity_plan() -> None:
@@ -226,3 +241,25 @@ async def test_gemini_final_answer_enables_thinking_without_max_tokens(monkeypat
     assert "max_tokens" not in request_bodies[0]
     assert "只输出答案本身" in request_bodies[0]["messages"][0]["content"]
     assert "唯一对应关系" in request_bodies[0]["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_apiroute_model_uses_shared_key_without_provider_specific_parameters(monkeypatch) -> None:
+    request_bodies = []
+
+    async def fake_call_chat(_, __, ___, body, stream=False, on_stream_chunk=None):
+        request_bodies.append(body)
+        return "42", {"usage": {}}
+
+    monkeypatch.setattr("app.services.call_chat", fake_call_chat)
+    model = get_audit_model("glm-5.2")
+    settings = Settings(apiroute_api_key="test-key")
+    question = Question(question="求 6 乘 7", answer="42")
+    work = CheckWorkItem(provider="apiroute", check_type="answer", stage="solve", payload={"model": model.snapshot()})
+
+    await execute_model(work, question, settings)
+
+    assert request_bodies[0]["model"] == "glm-5.2"
+    assert request_bodies[0]["temperature"] == 0
+    assert "thinking" not in request_bodies[0]
+    assert "max_tokens" not in request_bodies[0]

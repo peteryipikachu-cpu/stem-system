@@ -21,7 +21,7 @@ from .config import Settings
 from .db import SessionLocal
 from .audit_models import AuditModel, get_audit_model, model_from_snapshot
 from .models import CheckBatch, CheckEvent, CheckResult, CheckRun, CheckWorkItem, Question, QuestionVersion
-from .queue import acquire, doubao_key_candidates, pop_ready as pop_ready_queue, provider_scope, release
+from .queue import acquire, pop_ready as pop_ready_queue, provider_key_candidates, provider_scope, release
 from .schemas import DEFAULT_CHECK_TYPES, VALID_CHECK_TYPES
 
 
@@ -580,14 +580,14 @@ async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_ke
 
 
 async def execute_model(work: CheckWorkItem, question: Question, settings: Settings,
-                        doubao_api_key: Optional[str] = None,
+                        provider_api_key: Optional[str] = None,
                         on_stream_chunk: Optional[StreamObserver] = None) -> tuple[dict[str, Any], list[Any]]:
     model = work_audit_model(work)
     read_timeout = settings.ai_doubao_read_timeout_seconds if work.provider == "doubao" else settings.ai_model_read_timeout_seconds
     timeout = httpx.Timeout(connect=30, read=read_timeout, write=30, pool=30)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if work.provider == "doubao":
-            api_key = doubao_api_key or settings.doubao_api_key
+            api_key = provider_api_key or settings.doubao_api_key
             if work.stage == "equivalence":
                 answers = work.payload.get("answers", [])
                 flags, raw = await judge_equivalences(
@@ -654,6 +654,27 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 request_body["thinking"] = {"type": "enabled"}
                 request_body["reasoning"] = {"effort": "high"}
             content, raw = await call_chat(client, settings.gemini_base_url, api_key, request_body)
+            return {"answer": content[:10000]}, [raw]
+        if work.provider == "apiroute":
+            api_key = provider_api_key or settings.apiroute_api_key
+            if work.stage == "equivalence":
+                answers = work.payload.get("answers", [])
+                flags, raw = await judge_equivalences(
+                    client, base_url=settings.apiroute_base_url, api_key=api_key, model=model,
+                    question_text=question.question, reference_answer=question.answer, answers=answers,
+                )
+                return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
+            if work.stage == "synthesis":
+                prompt = f"""判断下列题目是否疑似由生成式 AI 生成。只分析题干与答案中可见的 AI 生成痕迹，不能用题目难度、专业性、正确性或标准公式作为证据；证据不足时判定 false。只输出 JSON：{{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}
+题目：{question.question}
+参考答案：{question.answer}"""
+            else:
+                prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
+            content, raw = await call_chat(client, settings.apiroute_base_url, api_key, {
+                "model": model.id,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0,
+            })
             return {"answer": content[:10000]}, [raw]
         raise ValueError(f"unsupported provider: {work.provider}")
 
@@ -964,7 +985,7 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
     provider = "rule"
     stage = "check"
     rate_limit_scope = provider
-    doubao_api_key: Optional[str] = None
+    provider_api_key: Optional[str] = None
     lease_heartbeat_task: Optional[asyncio.Task[None]] = None
     lease_heartbeat_stop: Optional[asyncio.Event] = None
     try:
@@ -998,8 +1019,8 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
         provider, stage = work.provider, work.stage
         rate_limit_scope = provider
         estimated_tokens = 300 if provider == "rule" else max(1_000, len(str(work.payload)) // 3 + 1_000)
-        if provider == "doubao":
-            candidates = await doubao_key_candidates(redis, settings)
+        if provider in {"doubao", "apiroute"}:
+            candidates = await provider_key_candidates(redis, settings, provider)
             if not candidates:
                 raise ValueError("provider API key not configured")
             any_key_available = False
@@ -1010,7 +1031,7 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
                 any_key_available = True
                 if await acquire(redis, settings, provider, stage, int(time.time() * 1000), estimated_tokens, candidate_scope):
                     acquired = True
-                    doubao_api_key = candidate
+                    provider_api_key = candidate
                     rate_limit_scope = candidate_scope
                     break
             if not acquired and not any_key_available:
@@ -1094,7 +1115,7 @@ async def worker_once(session: AsyncSession, redis: Redis, settings: Settings, i
                 result: dict[str, Any] = latex_check(f"{question.question}\\n{question.answer}")
             else:
                 result, raw_responses = await execute_model(
-                    work, question, settings, doubao_api_key, on_stream_chunk=observe_stream,
+                    work, question, settings, provider_api_key, on_stream_chunk=observe_stream,
                 )
                 if raw_responses and isinstance(raw_responses[-1], dict):
                     usage = raw_responses[-1].get("usage")

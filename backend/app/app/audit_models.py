@@ -24,6 +24,9 @@ AUDIT_MODELS = {
     "doubao-seed-2-0-pro-260215": AuditModel("doubao-seed-2-0-pro-260215", "doubao-2.0-pro", "doubao", 8, 6),
     "doubao-seed-2-1-pro-260628": AuditModel("doubao-seed-2-1-pro-260628", "doubao-2.1-pro", "doubao", 4, 2),
     "gemini-3.1-pro-preview": AuditModel("gemini-3.1-pro-preview", "gemini-3.1-pro", "gemini", 8, 6),
+    "glm-5.2": AuditModel("glm-5.2", "glm-5.2", "apiroute", 3, 2),
+    "qwen3.7-max": AuditModel("qwen3.7-max", "qwen3.7-max", "apiroute", 3, 2),
+    "kimi-k3": AuditModel("kimi-k3", "kimi-k3", "apiroute", 3, 2),
 }
 
 
@@ -48,6 +51,8 @@ def provider_is_configured(settings: Settings, provider: str) -> bool:
         return bool(settings.doubao_keys or settings.apiroute_keys)
     if provider == "gemini":
         return bool(settings.gemini_keys or settings.apiroute_keys or settings.doubao_keys)
+    if provider == "apiroute":
+        return bool(settings.shared_apiroute_keys)
     return False
 
 
