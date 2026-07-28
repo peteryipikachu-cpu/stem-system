@@ -579,6 +579,20 @@ async def judge_equivalences(client: httpx.AsyncClient, *, base_url: str, api_ke
     return [bool(flag) for flag in flags], raw
 
 
+def apiroute_thinking_options(model_id: str, *, deep: bool) -> dict[str, Any]:
+    """Return the gateway-specific thinking controls for the shared APIRoute models."""
+    if model_id == "kimi-k3":
+        return {"reasoning_effort": "max" if deep else "low"}
+    if model_id == "glm-5.2":
+        return {
+            "thinking": {"type": "enabled" if deep else "disabled"},
+            **({"reasoning_effort": "max"} if deep else {}),
+        }
+    if model_id == "qwen3.7-max":
+        return {"enable_thinking": deep}
+    return {}
+
+
 async def execute_model(work: CheckWorkItem, question: Question, settings: Settings,
                         provider_api_key: Optional[str] = None,
                         on_stream_chunk: Optional[StreamObserver] = None) -> tuple[dict[str, Any], list[Any]]:
@@ -662,6 +676,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 flags, raw = await judge_equivalences(
                     client, base_url=settings.apiroute_base_url, api_key=api_key, model=model,
                     question_text=question.question, reference_answer=question.answer, answers=answers,
+                    request_options=apiroute_thinking_options(model.id, deep=False),
                 )
                 return {"equivalences": flags, "usage": raw.get("usage")}, [raw]
             if work.stage == "synthesis":
@@ -670,11 +685,20 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
 参考答案：{question.answer}"""
             else:
                 prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
-            content, raw = await call_chat(client, settings.apiroute_base_url, api_key, {
+            request_body: dict[str, Any] = {
                 "model": model.id,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0,
-            })
+            }
+            if work.stage == "solve":
+                request_body.update(apiroute_thinking_options(model.id, deep=True))
+            else:
+                request_body.update(apiroute_thinking_options(model.id, deep=False))
+            content, raw = await call_chat(
+                client, settings.apiroute_base_url, api_key, request_body,
+                stream=work.stage == "solve",
+                on_stream_chunk=on_stream_chunk if work.stage == "solve" else None,
+            )
             return {"answer": content[:10000]}, [raw]
         raise ValueError(f"unsupported provider: {work.provider}")
 

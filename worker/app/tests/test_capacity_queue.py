@@ -244,22 +244,33 @@ async def test_gemini_final_answer_enables_thinking_without_max_tokens(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_apiroute_model_uses_shared_key_without_provider_specific_parameters(monkeypatch) -> None:
-    request_bodies = []
+@pytest.mark.parametrize(
+    ("model_id", "deep_options", "shallow_options"),
+    [
+        ("kimi-k3", {"reasoning_effort": "max"}, {"reasoning_effort": "low"}),
+        ("glm-5.2", {"thinking": {"type": "enabled"}, "reasoning_effort": "max"}, {"thinking": {"type": "disabled"}}),
+        ("qwen3.7-max", {"enable_thinking": True}, {"enable_thinking": False}),
+    ],
+)
+async def test_apiroute_model_uses_stage_specific_thinking_controls(monkeypatch, model_id, deep_options, shallow_options) -> None:
+    requests = []
 
     async def fake_call_chat(_, __, ___, body, stream=False, on_stream_chunk=None):
-        request_bodies.append(body)
+        requests.append((body, stream))
+        if body["messages"][0]["content"].startswith("你是严谨的 STEM 答案等价判定器"):
+            return '{"equivalences": [false]}', {"usage": {}}
         return "42", {"usage": {}}
 
     monkeypatch.setattr("app.services.call_chat", fake_call_chat)
-    model = get_audit_model("glm-5.2")
+    model = get_audit_model(model_id)
     settings = Settings(apiroute_api_key="test-key")
     question = Question(question="求 6 乘 7", answer="42")
-    work = CheckWorkItem(provider="apiroute", check_type="answer", stage="solve", payload={"model": model.snapshot()})
 
-    await execute_model(work, question, settings)
+    await execute_model(CheckWorkItem(provider="apiroute", check_type="answer", stage="solve", payload={"model": model.snapshot()}), question, settings)
+    await execute_model(CheckWorkItem(provider="apiroute", check_type="answer", stage="equivalence", payload={"model": model.snapshot(), "answers": ["41"]}), question, settings)
+    await execute_model(CheckWorkItem(provider="apiroute", check_type="synthesis", stage="synthesis", payload={"model": model.snapshot()}), question, settings)
 
-    assert request_bodies[0]["model"] == "glm-5.2"
-    assert request_bodies[0]["temperature"] == 0
-    assert "thinking" not in request_bodies[0]
-    assert "max_tokens" not in request_bodies[0]
+    assert requests[0] == ({"model": model_id, "messages": requests[0][0]["messages"], "temperature": 0, **deep_options}, True)
+    assert requests[1] == ({"model": model_id, "messages": requests[1][0]["messages"], "temperature": 0, **shallow_options}, False)
+    assert requests[2] == ({"model": model_id, "messages": requests[2][0]["messages"], "temperature": 0, **shallow_options}, False)
+    assert "max_tokens" not in requests[0][0]
