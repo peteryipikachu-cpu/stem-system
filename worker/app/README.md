@@ -14,19 +14,26 @@
 | 审核类型 | 执行方式 | 结果 |
 | --- | --- | --- |
 | `latex` | 规则校验题干与答案中的 LaTeX | 格式通过/失败及错误信息 |
-| `difficulty` | 豆包独立解题 8 次，再做答案等价比较 | 答对次数与难度结论 |
-| `answer` | Gemini 独立解题 4 次，再由豆包做等价比较 | 答案校验结论 |
-| `synthesis` | 模型分析题目中的疑似 AI 生成痕迹 | 置信度与可见证据 |
+| `difficulty` | 所选模型独立解题 K 次，再由同一模型做语义等价判断 | 答对次数与难度结论 |
+| `answer` | 所选模型独立解题 K 次，再由同一模型做语义等价判断 | 答案可信度结论 |
+| `synthesis` | 所选模型单次分析题目中的疑似 AI 生成痕迹 | 置信度与可见证据 |
 
-难度审核中的独立解题请求会启用高推理强度，并限制为只返回最终答案；答案等价比较阶段关闭思考模式，减少无关的推理开销。
+难度和答案审核的独立解题请求会按模型启用深度思考，并限制为只返回最终答案；答案等价比较和 AI 合成题检测关闭或降低思考强度，减少无关推理开销。LaTeX 检测始终是本地规则，不调用模型。
+
+| 模型 | Pass@K | 难度通过条件 |
+| --- | ---: | --- |
+| `doubao-2.0-pro` / `gemini-3.1-pro` | 8 | 答对 ≤6 次 |
+| `doubao-2.1-pro` | 4 | 答对 ≤2 次 |
+| `glm-5.2` / `qwen3.7-max` / `kimi-k3` | 3 | 答对 ≤2 次 |
+
+答案校验中至少一次与参考答案语义等价，即判定答案可信。模型选择按任务快照保存，执行中不会被环境变量中的默认模型覆盖。
 
 ## 多 Key 并发设计
 
-`DOUBAO_API_KEYS` 支持以逗号分隔的 Key 池。每个 Key 都有独立的 Redis 并发、RPM 和 TPM 桶：
+`APIROUTE_API_KEYS` 支持以逗号分隔的共享 Key 池。所有模型都通过 `APIROUTE_BASE_URL` 访问同一个 OpenAI 兼容网关；每个 Key 都有独立的 Redis 并发、RPM 和 TPM 桶：
 
-- 默认每把 Key 有 2 个深度解题并发位（`AI_LIMIT_DOUBAO_DEEP_CONCURRENCY=2`）。
-- 3 把 Key 最多可同时运行 6 个深度解题任务；4 把 Key 可同时覆盖一次难度审核的 8 次独立解题。
-- 更多 Key 可以提高多题并发吞吐；单题的提升会受任务数量和最后的等价比较阶段限制。
+- 供应商级并发仍由 `AI_LIMIT_DOUBAO_*`、`AI_LIMIT_GEMINI_*` 与 `AI_LIMIT_APIROUTE_*` 控制；它们限制不同模型的执行槽位，不再代表不同的密钥来源。
+- 更多 Key 可以提高多题并发吞吐；单题的提升会受 Pass@K、供应商并发和最后的等价比较阶段限制。
 - 如果多个 Key 共享上游账号级配额，实际加速仍会受到上游总限流约束。
 
 不要在文档、日志或提交中写入真实 Key。
@@ -44,12 +51,7 @@
 前置条件：Python 3.9+、与后端相同的 PostgreSQL 和 Redis，且后端已完成数据库迁移。
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
-
-python -m app.worker
+env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/python -m app.worker
 ```
 
 Worker 不启动 HTTP 服务；它会持续消费队列。停止时会取消正在执行的任务并归还领取的工作项，避免遗留永久的 `running` 状态。
@@ -59,8 +61,8 @@ Worker 不启动 HTTP 服务；它会持续消费队列。停止时会取消正�
 ```dotenv
 DATABASE_URL=postgresql+asyncpg://<user>:<password>@localhost:5432/<database>
 REDIS_URL=redis://localhost:6379/0
-DOUBAO_API_KEYS=<key-1>,<key-2>,<key-3>,<key-4>
-DOUBAO_BASE_URL=<provider-openai-compatible-url>
+APIROUTE_API_KEYS=<key-1>,<key-2>,<key-3>,<key-4>
+APIROUTE_BASE_URL=https://apiroute.bodenai.net/v1
 ```
 
 请根据 Key 池规模调整 `WORKER_CONCURRENCY`，使其能够覆盖各 Key 的并发上限总和；完整可调参数见 [`.env.example`](.env.example)。

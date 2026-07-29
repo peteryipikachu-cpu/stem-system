@@ -26,6 +26,13 @@ flowchart LR
 - Worker 领取工作项、调用模型、持久化结果并写入事件。
 - 前端通过 SSE 获取进度；断线时可重新查询任务状态。
 
+### 模型任务契约
+
+- 每次难度、答案或 AI 合成题检测都携带用户选择的模型；API 将模型 ID、展示名、Pass@K 和难度阈值写入任务快照。
+- 支持 `doubao-2.0-pro`、`doubao-2.1-pro`、`gemini-3.1-pro`、`glm-5.2`、`qwen3.7-max` 与 `kimi-k3`。
+- 同一题目的进行中任务不能切换为另一模型，避免不同模型同时写入同一检查项的结果。
+- API 不直接等待或执行上游模型调用；实际模型请求、流式进度和用量统计均由 Worker 完成。
+
 ## 技术要点
 
 - **FastAPI + Pydantic**：明确请求/响应契约和错误语义。
@@ -36,25 +43,19 @@ flowchart LR
 
 ## 本地运行
 
-前置条件：Python 3.9+、PostgreSQL、Redis。
+前置条件：Conda Python、PostgreSQL、Redis。
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env
-
 # 首次使用时创建 DATABASE_URL 指定的数据库；已有数据库时可安全重复执行。
-stem-init-db
-alembic upgrade head
+/opt/anaconda3/bin/python -m alembic upgrade head
 
-uvicorn app.main:app --reload --port 8000
+env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 启动后可访问：
 
-- 健康检查：`http://localhost:8000/healthz`
-- OpenAPI 文档：`http://localhost:8000/docs`
+- 健康检查：`http://127.0.0.1:8000/healthz`
+- OpenAPI 文档：`http://127.0.0.1:8000/docs`
 
 `DATABASE_URL` 必须指向实际 PostgreSQL；宿主机运行时不要使用仅容器内部可解析的主机名。
 
@@ -71,7 +72,7 @@ uvicorn app.main:app --reload --port 8000
 | `AUTH_SECRET` | 会话签名密钥，必须使用高强度随机值。 |
 | `AUTH_COOKIE_SECURE` | HTTPS 环境设为 `true`。 |
 
-模型 Key 与并发配额配置由 Worker 使用；请在 Worker 仓库配置模型访问凭据。不要提交 `.env`、数据库转储或真实密钥。
+模型 Key 与并发配额由 Worker 负责。所有审核模型共用 `APIROUTE_API_KEYS` 和 `APIROUTE_BASE_URL`；请在 Worker 仓库配置实际凭据。不要提交 `.env`、数据库转储或真实密钥。
 
 ## 质量检查
 
