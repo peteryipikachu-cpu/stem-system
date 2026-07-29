@@ -597,15 +597,20 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                         provider_api_key: Optional[str] = None,
                         on_stream_chunk: Optional[StreamObserver] = None) -> tuple[dict[str, Any], list[Any]]:
     model = work_audit_model(work)
-    read_timeout = settings.ai_doubao_read_timeout_seconds if work.provider == "doubao" else settings.ai_model_read_timeout_seconds
+    if work.provider == "doubao":
+        read_timeout = settings.ai_doubao_read_timeout_seconds
+    elif work.provider == "apiroute" and model.id == "glm-5.2":
+        read_timeout = settings.ai_glm_read_timeout_seconds
+    else:
+        read_timeout = settings.ai_model_read_timeout_seconds
     timeout = httpx.Timeout(connect=30, read=read_timeout, write=30, pool=30)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if work.provider == "doubao":
-            api_key = provider_api_key or settings.doubao_api_key
+            api_key = provider_api_key or (settings.apiroute_keys[0] if settings.apiroute_keys else None)
             if work.stage == "equivalence":
                 answers = work.payload.get("answers", [])
                 flags, raw = await judge_equivalences(
-                    client, base_url=settings.doubao_base_url, api_key=api_key, model=model,
+                    client, base_url=settings.apiroute_base_url, api_key=api_key, model=model,
                     question_text=question.question, reference_answer=question.answer, answers=answers,
                     request_options={"thinking": {"type": "disabled"}},
                     stream=True,
@@ -626,7 +631,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
 {{"is_synthetic": true/false, "confidence": 0-100, "reasons": [{{"type": "...", "evidence": "..."}}]}}"""
                 content, raw = await call_chat(
                     client,
-                    settings.doubao_base_url,
+                    settings.apiroute_base_url,
                     api_key,
                     {"model": model.id, "messages": [{"role": "user", "content": prompt}], "temperature": 0},
                     stream=True,
@@ -635,7 +640,7 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 return {"answer": content[:10000]}, [raw]
             # 难度校验只保留最终答案；答案比对阶段则在上方显式关闭思考。
             prompt = difficulty_answer_prompt(question.question) if work.check_type == "difficulty" else solve_prompt(question.question)
-            content, raw = await call_chat(client, settings.doubao_base_url, api_key, {
+            content, raw = await call_chat(client, settings.apiroute_base_url, api_key, {
                 "model": model.id,
                 "messages": [{"role": "user", "content": prompt}],
                 "thinking": {"type": "enabled"},
@@ -644,11 +649,11 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
             }, stream=True, on_stream_chunk=on_stream_chunk)
             return {"answer": content[:10000]}, [raw]
         if work.provider == "gemini":
-            api_key = settings.gemini_keys[0] if settings.gemini_keys else None
+            api_key = provider_api_key or (settings.apiroute_keys[0] if settings.apiroute_keys else None)
             if work.stage == "equivalence":
                 answers = work.payload.get("answers", [])
                 flags, raw = await judge_equivalences(
-                    client, base_url=settings.gemini_base_url, api_key=api_key, model=model,
+                    client, base_url=settings.apiroute_base_url, api_key=api_key, model=model,
                     question_text=question.question, reference_answer=question.answer, answers=answers,
                     request_options={"thinking": {"type": "enabled"}, "reasoning": {"effort": "high"}},
                 )
@@ -667,10 +672,10 @@ async def execute_model(work: CheckWorkItem, question: Question, settings: Setti
                 # 唯一答案题不输出备选映射。
                 request_body["thinking"] = {"type": "enabled"}
                 request_body["reasoning"] = {"effort": "high"}
-            content, raw = await call_chat(client, settings.gemini_base_url, api_key, request_body)
+            content, raw = await call_chat(client, settings.apiroute_base_url, api_key, request_body)
             return {"answer": content[:10000]}, [raw]
         if work.provider == "apiroute":
-            api_key = provider_api_key or settings.apiroute_api_key
+            api_key = provider_api_key or (settings.apiroute_keys[0] if settings.apiroute_keys else None)
             if work.stage == "equivalence":
                 answers = work.payload.get("answers", [])
                 flags, raw = await judge_equivalences(

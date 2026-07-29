@@ -113,7 +113,7 @@ async def doubao_key_candidates(redis: Redis, settings: Settings) -> list[str]:
 
 
 async def provider_key_candidates(redis: Redis, settings: Settings, provider: str) -> list[str]:
-    keys = settings.doubao_keys if provider == "doubao" else settings.shared_apiroute_keys
+    keys = settings.apiroute_keys
     if not keys:
         return []
     cursor = int(await redis.incr(f"stem:limit:{provider}:key-cursor"))

@@ -61,10 +61,10 @@ def test_stable_default_provider_limits_match_capacity_plan() -> None:
     assert (gemini.total_concurrency, gemini.lane_concurrency) == (2, 2)
 
 
-def test_doubao_key_pool_is_deduplicated_and_secret_safe_in_redis_scope() -> None:
-    settings = Settings(doubao_api_keys="first, second, first", doubao_api_key="legacy")
+def test_apiroute_key_pool_is_deduplicated_and_secret_safe_in_redis_scope() -> None:
+    settings = Settings(apiroute_api_keys="first, second, first")
 
-    assert settings.doubao_keys == ["first", "second", "legacy"]
+    assert settings.apiroute_keys == ["first", "second"]
     assert provider_scope("doubao", "first") != provider_scope("doubao", "second")
     assert "first" not in provider_scope("doubao", "first")
 
@@ -74,7 +74,9 @@ def test_doubao_deep_inference_timeout_is_covered_by_worker_lease() -> None:
 
     assert settings.ai_model_read_timeout_seconds == 600
     assert settings.ai_doubao_read_timeout_seconds == 3_600
+    assert settings.ai_glm_read_timeout_seconds == 3_600
     assert settings.lease_seconds > settings.ai_doubao_read_timeout_seconds
+    assert settings.lease_seconds >= settings.ai_glm_read_timeout_seconds
     assert settings.ai_retry_max_attempts == 1
 
 
@@ -121,7 +123,7 @@ async def test_identical_math_answers_bypass_model_equivalence_call(monkeypatch)
         raise AssertionError("canonical matches must not call the model")
 
     monkeypatch.setattr("app.services.call_chat", unexpected_call)
-    settings = Settings(gemini_api_key="test-key")
+    settings = Settings(apiroute_api_keys="test-key")
     question = Question(question="求值", answer="$\\frac{3}{16}$")
     work = CheckWorkItem(
         provider="gemini",
@@ -147,7 +149,7 @@ async def test_doubao_solve_uses_final_answer_format_without_max_tokens(monkeypa
         return "YES", {"usage": {}}
 
     monkeypatch.setattr("app.services.call_chat", fake_call_chat)
-    settings = Settings(doubao_api_key="test-key")
+    settings = Settings(apiroute_api_keys="test-key")
     question = Question(question="求 1 加 1", answer="2")
 
     await execute_model(CheckWorkItem(provider="doubao", stage="solve", payload={}), question, settings)
@@ -212,7 +214,7 @@ async def test_difficulty_solve_requests_only_the_final_answer(monkeypatch) -> N
         return "42", {"usage": {}}
 
     monkeypatch.setattr("app.services.call_chat", fake_call_chat)
-    settings = Settings(doubao_api_key="test-key")
+    settings = Settings(apiroute_api_keys="test-key")
     question = Question(question="求 6 乘 7", answer="42")
     work = CheckWorkItem(provider="doubao", check_type="difficulty", stage="solve", payload={})
 
@@ -231,7 +233,7 @@ async def test_gemini_final_answer_enables_thinking_without_max_tokens(monkeypat
         return "$-7/8$", {"usage": {}}
 
     monkeypatch.setattr("app.services.call_chat", fake_call_chat)
-    settings = Settings(gemini_api_key="test-key")
+    settings = Settings(apiroute_api_keys="test-key")
     question = Question(question="求常数 C", answer="-7/8")
 
     await execute_model(CheckWorkItem(provider="gemini", check_type="answer", stage="solve", payload={}), question, settings)
@@ -263,7 +265,7 @@ async def test_apiroute_model_uses_stage_specific_thinking_controls(monkeypatch,
 
     monkeypatch.setattr("app.services.call_chat", fake_call_chat)
     model = get_audit_model(model_id)
-    settings = Settings(apiroute_api_key="test-key")
+    settings = Settings(apiroute_api_keys="test-key")
     question = Question(question="求 6 乘 7", answer="42")
 
     await execute_model(CheckWorkItem(provider="apiroute", check_type="answer", stage="solve", payload={"model": model.snapshot()}), question, settings)
