@@ -155,7 +155,7 @@ ruff check .
 - 外部 AI 协同上下文沉淀：与 ChatGPT 等外部 AI 对话产生的架构决策、Prompt 调试或新规范，须显式导出为 Markdown 片段并追加沉淀到本文件中，确保各 AI Agent 可跨会话继承上下文记忆。
 - 新知识应说明适用组件、行为或限制，以及必要时的验证方式，方便后续维护者直接查阅；过期或被新实现替代的信息应同步更新。
 - 已验证的网关并发规则：`APIROUTE_API_KEYS` 可按逗号拆分，但若最终复用同一上游额度，不能提高实际吞吐。所有 APIRoute 模型共享一套全局额度，再叠加厂商额度；额度、价格和公平份额统一由数据库中的 `model_governance` 配置管理，不再使用环境变量 `AI_LIMIT_*`。
-- 难度分级评测：新题导入或保存新版本后会创建独立的 `difficulty_assessment` 队列任务，按 L0（本地 Markdown/LaTeX）→L1→L2→L3 运行；策略在创建时写入 `CheckRun.model_versions` 快照，运行中不得读取或改用新的全局策略。
+- 难度分级评测：新题导入或保存新版本后会创建独立的 `difficulty_assessment` 队列任务，按 L0（本地 Markdown/LaTeX）→L1（过易筛选，4次测试，答对≥3次判定为过易退回定级L0；答对≤2次判定有难度通过晋级L2）→L2（标准题确认，6次测试，答对≥4次判定为L2标准题入库，答对≤3次判定高于L2晋级L3）→L3（旗舰分级，12次测试，答对≥6次判定为L3难题入库）。策略在创建时写入 `CheckRun.model_versions` 快照，运行中不得读取或改用新的全局策略。
 - 分级版本隔离：`CheckRun.question_version` 与工作项 payload 的 `questionVersion` 固化题目版本；旧版本尚未完成的评测只能写入该历史版本的结果，不能覆盖当前题目的 `difficulty_level`、`difficulty_status` 或当前分级引用。
 - APIRoute 模型接入：新增 OpenAI-compatible 网关模型时，须同步更新前端、后端与 Worker 的 `audit_models` 目录；统一使用 `provider="apiroute"`，共享 `APIROUTE_API_KEYS` 和 APIRoute 并发/限流通道。未提供专属规则时，默认 Pass@K 3、难度答对阈值 ≤2，深度思考参数保持关闭。
 - 网关连接排障：`network_error: ConnectError` 表示连接层在获得 HTTP 响应前失败，属于可重试错误；Worker 会按指数退避重新进入公平队列。可用 `stem-system-worker/app/scripts/probe_apiroute_synthesis.py --smoke` 发送不含题目内容的流式探针，记录 DNS、响应头与首个流式片段耗时，且不会输出密钥。
