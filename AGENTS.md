@@ -164,7 +164,7 @@ ruff check .
 - APIRoute 模型接入：新增 OpenAI-compatible 网关模型时，须同步更新前端、后端与 Worker 的 `audit_models` 目录；统一使用 `provider="apiroute"`，共享 `APIROUTE_API_KEYS` 和 APIRoute 并发/限流通道。未提供专属规则时，默认 Pass@K 3、难度答对阈值 ≤2，深度思考参数保持关闭。
 - 网关连接排障：`network_error: ConnectError` 表示连接层在获得 HTTP 响应前失败，属于可重试错误；Worker 会按指数退避重新进入公平队列。可用 `stem-system-worker/app/scripts/probe_apiroute_synthesis.py --smoke` 发送不含题目内容的流式探针，记录 DNS、响应头与首个流式片段耗时，且不会输出密钥。
 - 网关 403 排障：请求约 100ms 内返回 `403 Forbidden` 时，必须读取响应 body 判定具体原因：`insufficient_user_quota`（如“用户额度不足，剩余额度: ¥-x”）表示 APIRoute 账户余额耗尽，所有模型调用（含不含题目内容的 `--smoke` 探针）都会被拒，需充值或更换 `APIROUTE_API_KEYS`，不是内容审核或代码问题。切勿仅凭“秒回 403”就归因为内容审核。
-- 错误文案面向用户：Worker `provider_error` 通过 `friendly_http_message` 解析上游网关 JSON 错误体，把 `insufficient_user_quota`、鉴权失败等错误翻译成可操作的中文说明后才落库，前端（如“分级评测失败”提示）不应出现 httpx 原始信息（状态码 + 内部 URL）；新增上游错误码时须在该映射中同步补充。
+- 错误文案面向用户：Worker `provider_error` 通过 `friendly_http_message` 解析上游网关 JSON 错误体，把 `insufficient_user_quota`、鉴权失败等错误翻译成可操作的中文说明后才落库，前端（如“分级评测失败”提示）不应出现 httpx 原始信息（状态码 + 内部 URL）；新增上游错误码时须在该映射中同步补充。注意 httpx 流式响应不会自动读体，`raise_for_status()` 前必须对非 2xx 响应先 `aread()`，否则错误翻译读不到响应体。
 
 ### 高吞吐调度与成本治理
 
@@ -173,6 +173,7 @@ ruff check .
 - 解题/分级作答、AI 合成题检测、答案或相似题比对的 TPM 输出预留分别为 32,768、8,192、2,048；只用于令牌预算，严禁作为 `max_tokens` 或 `max_completion_tokens` 传给上游。
 - 每次真实上游请求（包括重试）会写入 `model_request_ledgers`，固化 Token、耗时、状态、错误、价格、汇率和成本快照。优先记录上游 usage；缺失时回退本地估算并标记“估算”。思考 Token 单列展示，不重复计入输出计费。
 - 仅 `408/429/500/502/503/504` 和连接/超时/协议中断等临时网络错误可重试；最多 5 次重试，退避 `2/4/8/16/32` 秒并加 `0~1` 秒抖动。`400/401/403/404/405/409/410/413/415/422`、无效模型/参数/响应结构和缺失密钥直接失败；退避期间不占任何执行槽位。
+- 账号配额强制生效：Worker 在派发每个模型调用前执行 `user_quota_violation` 门控，按 `model_request_ledgers` 统计归属用户的当日/当月请求数（含重试与失败）和当月累计成本；生效值 = 账号专属值优先，未设置取治理配置 `userQuotaDefaults`，0 表示不限制。超额时工作项保持 `queued` 并标记 `quota_exceeded`，每 60 秒重试一次，不记失败、不转人工，额度恢复（次日/下月/调高配置）后自动继续。规则类阶段（如 L0 LaTeX）不经门控。
 
 ### 模型思考参数
 
