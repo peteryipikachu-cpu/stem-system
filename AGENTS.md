@@ -163,7 +163,7 @@ ruff check .
 - 重新分级/重新检测增量复用：触发重试时只把失败、超时或未完成的作答工作项重新入队；已成功完成且 `result.answer` 有效的作答按 `(level, 模型, modelAttempt)` 匹配后直接继承（置 `completed`、拷贝结果与耗时、payload 标记 `inheritedFrom`），跳过 Redis 入队以节省上游配额。复用范围仅限同题同检查项的最近一次历史 `CheckRun`，且必须满足版本隔离；若所有作答均被继承，比对任务（`equivalence`/`assessment_equivalence`）由后端或 Worker 直接唤醒，不得遗留永久阻塞。
 - APIRoute 模型接入：新增 OpenAI-compatible 网关模型时，须同步更新前端、后端与 Worker 的 `audit_models` 目录；统一使用 `provider="apiroute"`，共享 `APIROUTE_API_KEYS` 和 APIRoute 并发/限流通道。未提供专属规则时，默认 Pass@K 3、难度答对阈值 ≤2，深度思考参数保持关闭。
 - 网关连接排障：`network_error: ConnectError` 表示连接层在获得 HTTP 响应前失败，属于可重试错误；Worker 会按指数退避重新进入公平队列。可用 `stem-system-worker/app/scripts/probe_apiroute_synthesis.py --smoke` 发送不含题目内容的流式探针，记录 DNS、响应头与首个流式片段耗时，且不会输出密钥。
-- 网关内容审核排障：若请求在约 100ms 内返回 `403 Forbidden` 且 `--smoke` 探针正常，通常是网关内容审核拒绝了题目内容而非密钥或代码问题；可用 `--question-id <题目ID>` 复现确认，属于上游策略，需网关侧处理。
+- 网关 403 排障：请求约 100ms 内返回 `403 Forbidden` 时，必须读取响应 body 判定具体原因：`insufficient_user_quota`（如“用户额度不足，剩余额度: ¥-x”）表示 APIRoute 账户余额耗尽，所有模型调用（含不含题目内容的 `--smoke` 探针）都会被拒，需充值或更换 `APIROUTE_API_KEYS`，不是内容审核或代码问题。切勿仅凭“秒回 403”就归因为内容审核。
 
 ### 高吞吐调度与成本治理
 
