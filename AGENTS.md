@@ -127,6 +127,7 @@ ruff check .
 - 修改事件格式时同时检查后端 `run_events`/`emit`、Nginx 的 SSE 缓冲配置，以及前端订阅逻辑。
 - 不要以同步 HTTP 等待外部 AI 完成为替代队列；超时、重试和租约恢复是系统可靠性的一部分。
 - Worker 心跳（`stem:workers:heartbeat:*`，TTL 15 秒）必须由独立后台任务周期性刷新，不能只在调度主循环迭代时写入；否则所有并发槽位被长耗时模型调用占满、`asyncio.wait` 长时间不返回时心跳会断档，队列监控误报 Worker 离线。诊断 Worker 状态时先查该 Redis 键的 TTL，再看 `pg_stat_activity` 与 `check_work_items.updated_at` 是否仍在推进。
+- Worker 完成事务必须校验工作项终态：重启/恢复可能造成同一工作项被重复执行，迟到的完成不得覆盖结果或再次触发比对/收尾级联（完成前检查 `status == running` 且 `completed_at` 为空）。同理 `update_assessment_progress` 等进度回执不得把已由比对定稿（pass/fail）的层级倒回 `equivalent=None` 的中间态，否则前端会永久显示“待比对”。
 
 ### 数据库迁移
 
