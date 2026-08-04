@@ -86,6 +86,7 @@ ruff check .
 
 ### 代码提交与推送（三个独立 GitLab 仓库）
 
+- 自动提交与推送：每次完成修改或功能开发并验证通过后，须自动进入对应的组件仓库（前端、后端 API 或 Worker）执行 `git status` 检查，完成规范的 `git add`、有明确中文说明的 `git commit` 以及 `git push origin main`，确保代码变更实时同步至 GitLab。
 - `stem-system-frontend/app`、`stem-system-backend/app`、`stem-system-worker/app` 均是独立仓库，分别提交和推送；它们的 `origin` 指向各自的 GitLab 仓库，默认分支为 `main`。
 - 提交前必须进入对应组件目录并检查变更：
 
@@ -121,6 +122,7 @@ ruff check .
 ### 队列与 SSE
 
 - API 只创建 `CheckRun`/批次并入队，Worker 负责实际执行。保持两者可独立重启和幂等。
+- 后端仓库不得复制 Worker 的模型 HTTP 调用、Prompt、租约恢复、重试、熔断或消费入口；后端仅保留工作项建模、入队、查询和 SSE，执行逻辑统一位于 `stem-system-worker/app`。
 - 对可能重复提交的启动接口保留 `Idempotency-Key` 行为。
 - 修改事件格式时同时检查后端 `run_events`/`emit`、Nginx 的 SSE 缓冲配置，以及前端订阅逻辑。
 - 不要以同步 HTTP 等待外部 AI 完成为替代队列；超时、重试和租约恢复是系统可靠性的一部分。
@@ -148,6 +150,37 @@ ruff check .
 
 ## 项目知识沉淀
 
+- 自动沉淀机制：Agent 在每完成一个独立任务（如功能开发、排障、架构重构、Prompt 调优）后，须自动评估是否有具备长久复用价值的知识或约束，并在任务交付时自动写入落盘到本文件的相关章节中，无需用户重复提醒。
 - 每次在开发、排障、部署或模型联调中确认了可复用的事实、约束或操作方式，都应在本文件的相应章节补充简洁说明；避免记录密钥、Cookie、个人信息和临时日志。
+- 外部 AI 协同上下文沉淀：与 ChatGPT 等外部 AI 对话产生的架构决策、Prompt 调试或新规范，须显式导出为 Markdown 片段并追加沉淀到本文件中，确保各 AI Agent 可跨会话继承上下文记忆。
 - 新知识应说明适用组件、行为或限制，以及必要时的验证方式，方便后续维护者直接查阅；过期或被新实现替代的信息应同步更新。
-- 已验证的网关并发规则：`APIROUTE_API_KEYS` 是按逗号拆分的 Key 池；每个 Key 各自承担本地并发/限流作用域。若多个网关 Key 最终复用同一个上游额度，并不会提升上游并发或配额；应以网关和上游的实际容量设置 `AI_LIMIT_APIROUTE_CONCURRENCY`、每模型通道并发、RPM 与 TPM。
+- 已验证的网关并发规则：`APIROUTE_API_KEYS` 可按逗号拆分，但若最终复用同一上游额度，不能提高实际吞吐。所有 APIRoute 模型共享一套全局额度，再叠加厂商额度；额度、价格和公平份额统一由数据库中的 `model_governance` 配置管理，不再使用环境变量 `AI_LIMIT_*`。
+- 难度分级评测：新题导入或保存新版本后会创建独立的 `difficulty_assessment` 队列任务，按 L0（本地 Markdown/LaTeX）→L1→L2→L3 运行；策略在创建时写入 `CheckRun.model_versions` 快照，运行中不得读取或改用新的全局策略。
+- 分级版本隔离：`CheckRun.question_version` 与工作项 payload 的 `questionVersion` 固化题目版本；旧版本尚未完成的评测只能写入该历史版本的结果，不能覆盖当前题目的 `difficulty_level`、`difficulty_status` 或当前分级引用。
+- APIRoute 模型接入：新增 OpenAI-compatible 网关模型时，须同步更新前端、后端与 Worker 的 `audit_models` 目录；统一使用 `provider="apiroute"`，共享 `APIROUTE_API_KEYS` 和 APIRoute 并发/限流通道。未提供专属规则时，默认 Pass@K 3、难度答对阈值 ≤2，深度思考参数保持关闭。
+- 网关连接排障：`network_error: ConnectError` 表示连接层在获得 HTTP 响应前失败，属于可重试错误；Worker 会按指数退避重新进入公平队列。可用 `stem-system-worker/app/scripts/probe_apiroute_synthesis.py --smoke` 发送不含题目内容的流式探针，记录 DNS、响应头与首个流式片段耗时，且不会输出密钥。
+
+### 高吞吐调度与成本治理
+
+- 所有外部模型调用先同时获取 APIRoute 全局与厂商两层额度。默认全局为并发 12、RPM 36、TPM 480,000；厂商默认额度见管理员“模型管理 / 调用治理与成本”，仅允许在有上游配额依据时调整。
+- 队列调度单位是单个工作项，优先级内按“项目 → 用户 → 工作项”轮转。同一用户每轮只派发一个工作项；存在其他等待者时，单项目最多占用 8 个外部槽位、单用户最多占用 3 个。无竞争时允许借用空闲槽位。
+- 解题/分级作答、AI 合成题检测、答案或相似题比对的 TPM 输出预留分别为 32,768、8,192、2,048；只用于令牌预算，严禁作为 `max_tokens` 或 `max_completion_tokens` 传给上游。
+- 每次真实上游请求（包括重试）会写入 `model_request_ledgers`，固化 Token、耗时、状态、错误、价格、汇率和成本快照。优先记录上游 usage；缺失时回退本地估算并标记“估算”。思考 Token 单列展示，不重复计入输出计费。
+- 仅 `408/429/500/502/503/504` 和连接/超时/协议中断等临时网络错误可重试；最多 5 次重试，退避 `2/4/8/16/32` 秒并加 `0~1` 秒抖动。`400/401/403/404/405/409/410/413/415/422`、无效模型/参数/响应结构和缺失密钥直接失败；退避期间不占任何执行槽位。
+
+### 模型思考参数
+
+- 唯一实现来源：`stem-system-worker/app/app/services.py`；模型目录以三端各自的 `audit_models.py` 为准。
+- L0 是本地 Markdown/LaTeX 校验，不调用模型；AI 合成题检测当前固定使用 `doubao-2.0-pro`。
+- 所有模型均通过 OpenAI-compatible APIRoute 网关请求；逻辑 Provider 仅用于区分参数和限流策略。
+
+| 模型 | 解题 / 难度分级作答 | 答案比对 | AI 合成题检测 | 流式策略 |
+| --- | --- | --- | --- | --- |
+| doubao-2.0-pro、doubao-2.1-pro | `thinking.type=enabled`；`reasoning.effort=high` | `thinking.type=disabled` | `thinking.type=enabled`；`reasoning.effort=medium` | 三种场景均流式 |
+| gemini-3.1-pro | `thinking.type=enabled`；`reasoning.effort=high` | `thinking.type=disabled` | `thinking.type=enabled`；`reasoning.effort=medium` | 当前均非流式 |
+| kimi-k3 | `reasoning_effort=max` | `reasoning_effort=low` | `reasoning_effort=high` | 仅解题流式 |
+| qwen3.7-plus、qwen3.7-max、qwen3.8-max | `enable_thinking=true`；`reasoning_effort=xhigh`；`temperature=0.7` | `enable_thinking=false`；`temperature=0.1` | `enable_thinking=true`；`reasoning_effort=medium` | 仅解题流式 |
+| deepseek-v4-flash、deepseek-v4-pro | `thinking.type=enabled`；`reasoning_effort=max`；`temperature=0.7` | `thinking.type=disabled`；`temperature=0.1` | `thinking.type=enabled`；`reasoning_effort=high` | 仅解题流式 |
+| claude-sonnet-5 | `output_config.effort=max` | `thinking.type=disabled` | `output_config.effort=high` | 仅解题流式 |
+
+- `glm-5.2` 已移除，不得重新加入默认策略或模型目录，除非完成可用性验证并明确授权。
