@@ -135,7 +135,7 @@ ruff check .
 - Worker 心跳（`stem:workers:heartbeat:*`，TTL 15 秒）必须由独立后台任务周期性刷新，不能只在调度主循环迭代时写入；否则所有并发槽位被长耗时模型调用占满、`asyncio.wait` 长时间不返回时心跳会断档，队列监控误报 Worker 离线。诊断 Worker 状态时先查该 Redis 键的 TTL，再看 `pg_stat_activity` 与 `check_work_items.updated_at` 是否仍在推进。
 - Worker 完成事务必须校验工作项终态：重启/恢复可能造成同一工作项被重复执行，迟到的完成不得覆盖结果或再次触发比对/收尾级联（完成前检查 `status == running` 且 `completed_at` 为空）。同理 `update_assessment_progress` 等进度回执不得把已由比对定稿（pass/fail）的层级倒回 `equivalent=None` 的中间态，否则前端会永久显示“待比对”。
 - 任务取消统一走后端 `cancel_check_run_core`（用户端 `/api/check-runs/{id}/cancel` 与队列监控 `/api/admin/queue/check-runs/{id}/cancel` 共用）：任务置 `cancelled`，queued/blocked/running 工作项作废并清租约，题目无其他活跃任务时复位 `pending`，并 emit `cancelled` 事件；对 completed/cancelled 幂等。管理端入口权限与“重新检测”一致（项目管理员仅限自己所在项目，越权 403/404）。
-- 取消不能中断已发起的上游流式调用，其迟到结果由 Worker 完成事务的终态校验丢弃；`complete_run_if_ready` 对 `cancelled` 任务必须直接短路返回，防止迟到完成把已取消任务翻回 completed/manual_review。Redis 公平队列中残留的已取消条目无需清理，派发入口已有 `status != "queued"` 丢弃逻辑。
+- 取消不能中断已发起的上游流式调用，其迟到结果由 Worker 完成事务的终态校验丢弃；丢弃结果不代表消耗未发生，对应 `ModelRequestLedger` 仍要经 `settle_discarded_ledger` 照常结算 Token 与成本（一行台账 = 一次真实上游请求），否则用量与成本统计偏低。`complete_run_if_ready` 对 `cancelled` 任务必须直接短路返回，防止迟到完成把已取消任务翻回 completed/manual_review。Redis 公平队列中残留的已取消条目无需清理，派发入口已有 `status != "queued"` 丢弃逻辑。
 
 ### 数据库迁移
 
