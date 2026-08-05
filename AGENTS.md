@@ -108,6 +108,7 @@ ruff check .
 - 页面和涉及浏览器状态、SWR、事件流的组件须保留正确的 Client Component 边界；不要把交互逻辑迁入未经确认的 Server Component。
 - API 调用应检查非成功响应并给出可用错误信息；接口返回变化时同步更新 `src/types/index.ts`、调用端和后端 schema。
 - 审核执行采用 `src/lib/check-runs.ts`：创建任务后订阅 `/api/check-runs/{id}/events`，同时保留轮询/重取数据的容错路径。不要将长时审核阻塞在浏览器请求中。
+- 题目详情页停留期间必须自动更新任务状态：Worker 的分级评测进度事件不带 `checkType`（只含 `difficultyStatus`/`currentLayer`/`detail`），SSE 回调不能只处理带 `checkType` 的 progress，否则评测卡片头部状态永远停在旧值；收到此类事件及 cancelled/paused/resumed 时应 `mutate()` 重取题目数据，并在存在活跃任务时开启 SWR 轮询兜底（详情页为 5 秒）。
 - 数学内容通过 `LatexRenderer` 呈现。修改公式处理时运行 Worker 的 LaTeX 测试（`stem-system-worker/app/tests/test_latex.py`），并注意不可信题干的渲染安全。
 - UI 保持 Ant Design 现有风格；避免无关的全局 CSS 改动和大范围重排。antd 的 Space 组件须使用 `orientation` 属性，`direction` 已弃用会触发控制台警告。
 - 同路由内的查询参数导航（顶部标签页 `/?view=...`、项目卡片 `/?projectId=...`、面包屑返回 `/`）统一用 `window.history.pushState`，Next.js 会同步 `useSearchParams`；不要用 `router.push`：纯 query 变更的 `router.push` 需要 RSC 往返并参与导航队列，服务端繁忙或存在未完成导航时会偶发点击无响应（跨路由跳转如 `/login`、`/questions/[id]` 仍用 `router.push/replace`）。
