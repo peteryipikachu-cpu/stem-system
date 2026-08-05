@@ -136,6 +136,9 @@ ruff check .
 - Worker 完成事务必须校验工作项终态：重启/恢复可能造成同一工作项被重复执行，迟到的完成不得覆盖结果或再次触发比对/收尾级联（完成前检查 `status == running` 且 `completed_at` 为空）。同理 `update_assessment_progress` 等进度回执不得把已由比对定稿（pass/fail）的层级倒回 `equivalent=None` 的中间态，否则前端会永久显示“待比对”。
 - 任务取消统一走后端 `cancel_check_run_core`（用户端 `/api/check-runs/{id}/cancel` 与队列监控 `/api/admin/queue/check-runs/{id}/cancel` 共用）：任务置 `cancelled`，queued/blocked/running 工作项作废并清租约，题目无其他活跃任务时复位 `pending`，并 emit `cancelled` 事件；对 completed/cancelled 幂等。管理端入口权限与“重新检测”一致（项目管理员仅限自己所在项目，越权 403/404）。
 - 取消不能中断已发起的上游流式调用，其迟到结果由 Worker 完成事务的终态校验丢弃；丢弃结果不代表消耗未发生，对应 `ModelRequestLedger` 仍要经 `settle_discarded_ledger` 照常结算 Token 与成本（一行台账 = 一次真实上游请求），否则用量与成本统计偏低。`complete_run_if_ready` 对 `cancelled` 任务必须直接短路返回，防止迟到完成把已取消任务翻回 completed/manual_review。Redis 公平队列中残留的已取消条目无需清理，派发入口已有 `status != "queued"` 丢弃逻辑。
+- 任务暂停/恢复统一走后端 `pause_check_run_core`/`resume_check_run_core`（队列监控 `POST /api/admin/queue/check-runs/{id}/pause`、`/resume`，权限与取消一致）：暂停时 run 置 `paused`，queued/blocked 工作项置 `paused`（清租约、不写 completed_at）；running 工作项不中断，跑完结果照常落库保留（上游调用本就无法中断），题目保持 `checking`；恢复时 paused 工作项回 `queued` 并按原 `available_at` 重新入队，仅 paused 可恢复（否则 409），暂停对 paused/completed/cancelled 幂等。暂停期间禁止对同题新建质检/改版本（后端活跃任务判定与冲突检测集合均包含 paused），暂停中的任务被取消时题目照常复位；Redis 公平队列中残留的已暂停条目同样无需清理，由派发门控的 `status != "queued"` 丢弃。
+- 暂停期间 Worker 激活路径全部冻结：任何“置 queued + 入队”路径（下游激活、下一层入队、可重试退避重入队、租约过期回收、派发前探测）必须检查 run.status，暂停时经 `schedule_or_hold` 把工作项置 `paused` 且不入队；`recover_ready_dependencies` 与 stuck 恢复跳过 paused 任务；`complete_run_if_ready` 对 paused 短路返回、未完成集合包含 paused，`reconcile_orphaned_runs` 活跃工作集合包含 paused，防止暂停任务被误收尾。新增任何工作项入队路径时必须同步补上暂停门控。
+- 台账行必须落到终态：Worker 关闭（CancelledError 路径）就地经 `mark_ledger_interrupted` 把被中断调用的台账结算为 `failed/error_code=execution_interrupted`（记输入估算、打估算标记）；进程被硬杀留下的孤儿行由 `settle_orphaned_ledgers` 在每轮恢复循环（含启动首轮）回收——条件为台账 running 且对应工作项不再 running。排查“台账出现多条同 attempt 记录”时，一条中断 + 一条重跑是重启的预期形态。
 
 ### 数据库迁移
 
