@@ -174,7 +174,7 @@ ruff check .
 
 - 所有外部模型调用先同时获取 APIRoute 全局与厂商两层额度。默认全局为并发 12、RPM 36、TPM 480,000；厂商默认额度见管理员“模型管理 / 调用治理与成本”，仅允许在有上游配额依据时调整。
 - 队列调度单位是单个工作项，优先级内按“项目 → 用户 → 工作项”轮转。同一用户每轮只派发一个工作项；存在其他等待者时，单项目最多占用 8 个外部槽位、单用户最多占用 3 个。无竞争时允许借用空闲槽位。
-- 解题/分级作答、AI 合成题检测、答案或相似题比对的 TPM 输出预留分别为 32,768、8,192、2,048；只用于令牌预算，严禁作为 `max_tokens` 或 `max_completion_tokens` 传给上游。例外：deepseek-v4-flash/pro 解题/分级作答显式传 `max_tokens=393216`（官方 384K 输出上限，1M 上下文）；qwen3.7-plus 显式传 `max_tokens=131072`（官方 128K 输出上限），均避免长思考耗尽输出预算导致答案被截断。
+- 解题/分级作答、AI 合成题检测、答案或相似题比对的 TPM 输出预留分别为 32,768、8,192、2,048；只用于令牌预算，严禁作为 `max_tokens` 或 `max_completion_tokens` 传给上游。例外：解题/分级作答的输出上限由治理配置 `models[].solveMaxTokens` 管理（管理员“模型管理”页可手动设置或清空），默认值 deepseek-v4-flash/pro=393216（官方 384K 输出上限，1M 上下文）、qwen3.7-plus=131072（官方 128K），其余模型默认留空不传；目的是避免长思考耗尽输出预算导致答案被截断，仅对 APIRoute 网关模型生效。
 - 每次真实上游请求（包括重试）会写入 `model_request_ledgers`，固化 Token、耗时、状态、错误、价格、汇率和成本快照。优先记录上游 usage；缺失时回退本地估算并标记“估算”，输出估算须把响应中的思考文本（`reasoning_content`）一并计入，否则思考模型成本会被严重低估。思考 Token 单列展示，不重复计入输出计费。
 - 仅 `408/429/500/502/503/504` 和连接/超时/协议中断等临时网络错误可重试；最多 5 次重试，退避 `2/4/8/16/32` 秒并加 `0~1` 秒抖动。`400/401/403/404/405/409/410/413/415/422`、无效模型/参数/响应结构和缺失密钥直接失败；退避期间不占任何执行槽位。
 - 账号配额强制生效：Worker 在派发每个模型调用前执行 `user_quota_violation` 门控，按 `model_request_ledgers` 统计归属用户的当日/当月请求数（含重试与失败）和当月累计成本；生效值 = 账号专属值优先，未设置取治理配置 `userQuotaDefaults`（在管理员“模型管理 / 调用治理”的“全局账号配额默认值”区块维护），0 表示不限制。超额时工作项保持 `queued` 并标记 `quota_exceeded`，每 60 秒重试一次，不记失败、不转人工，额度恢复（次日/下月/调高配置）后自动继续。规则类阶段（如 L0 LaTeX）不经门控。
@@ -184,15 +184,16 @@ ruff check .
 - 唯一实现来源：`stem-system-worker/app/app/services.py`；模型目录以三端各自的 `audit_models.py` 为准。
 - L0 包含本地 Markdown/LaTeX 校验（不调用模型）与 AI 合成题检测（当前固定使用 `doubao-2.0-pro`）；两者均为 `difficulty_assessment` 的 L0 工作项。
 - 所有模型均通过 OpenAI-compatible APIRoute 网关请求；逻辑 Provider 仅用于区分参数和限流策略。
+- 解题 `max_tokens` 不再硬编码：Worker 派发每个工作项时实时读取治理配置 `solveMaxTokens`，留空则不传；管理员在“模型管理”页修改保存后对新派发的工作项即时生效，无需重启或改代码。
 
 | 模型 | 解题 / 难度分级作答 | 答案比对 | AI 合成题检测 | 流式策略 |
 | --- | --- | --- | --- | --- |
 | doubao-2.0-pro、doubao-2.1-pro | `thinking.type=enabled`；`reasoning.effort=high` | `thinking.type=disabled` | `thinking.type=enabled`；`reasoning.effort=medium` | 三种场景均流式 |
 | gemini-3.1-pro | `thinking.type=enabled`；`reasoning.effort=high` | `thinking.type=disabled` | `thinking.type=enabled`；`reasoning.effort=medium` | 当前均非流式 |
 | kimi-k3 | `reasoning_effort=max` | `reasoning_effort=low` | `reasoning_effort=high` | 仅解题流式 |
-| qwen3.7-plus | `enable_thinking=true`；`reasoning_effort=xhigh`；`temperature=0.7`；`max_tokens=131072`（官方 128K 输出上限，防长思考截断答案） | `enable_thinking=false`；`temperature=0.1` | `enable_thinking=true`；`reasoning_effort=medium` | 仅解题流式 |
+| qwen3.7-plus | `enable_thinking=true`；`reasoning_effort=xhigh`；`temperature=0.7`；`max_tokens` 取自治理配置 `solveMaxTokens`（默认 131072，官方 128K 输出上限） | `enable_thinking=false`；`temperature=0.1` | `enable_thinking=true`；`reasoning_effort=medium` | 仅解题流式 |
 | qwen3.7-max、qwen3.8-max | `enable_thinking=true`；`reasoning_effort=xhigh`；`temperature=0.7` | `enable_thinking=false`；`temperature=0.1` | `enable_thinking=true`；`reasoning_effort=medium` | 仅解题流式 |
-| deepseek-v4-flash、deepseek-v4-pro | `thinking.type=enabled`；`reasoning_effort=max`；`temperature=0.7`；`max_tokens=393216`（官方 384K 输出上限，防长思考截断答案） | `thinking.type=disabled`；`temperature=0.1` | `thinking.type=enabled`；`reasoning_effort=high` | 仅解题流式 |
+| deepseek-v4-flash、deepseek-v4-pro | `thinking.type=enabled`；`reasoning_effort=max`；`temperature=0.7`；`max_tokens` 取自治理配置 `solveMaxTokens`（默认 393216，官方 384K 输出上限） | `thinking.type=disabled`；`temperature=0.1` | `thinking.type=enabled`；`reasoning_effort=high` | 仅解题流式 |
 | claude-sonnet-5 | `output_config.effort=max` | `thinking.type=disabled` | `output_config.effort=high` | 仅解题流式 |
 
 - `glm-5.2` 已移除，不得重新加入默认策略或模型目录，除非完成可用性验证并明确授权。
