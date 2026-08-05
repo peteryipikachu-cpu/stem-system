@@ -118,7 +118,7 @@ ruff check .
 - 项目管理员账号管理（`/api/project-users`）：项目管理员仅能查看、下发、编辑其所在项目内的普通用户；下发固定 `role="user"`，项目分配仅限请求者所在项目（越权 403）；编辑时保留请求者范围外的项目归属，非普通用户或不在其范围内的账号不可见（404）。角色升降仍为管理员专属；管理员全量账号管理继续走 `/api/users`。项目逻辑删除：管理员可删任意项目，项目管理员可删自己所在的项目（`DELETE /api/projects/{id}`，后端按 `project_scope` 校验）。
 - 个人题目上传上限：`User.question_upload_limit`（null=不限制），可在 `/api/users` 与 `/api/project-users` 的下发/编辑接口设置；`POST /api/questions` 按提交者名下题目总数门控，达上限或单次提交超出剩余配额时返回 409 并提示剩余可上传数量。账号列表接口附带 `questionCount`（已上传数）供前端展示消耗。设置上限时（`/api/users` 与 `/api/project-users` 的下发/编辑）会校验项目全部成员上限总和不超过项目题目目标（仅目标 > 0 的项目，未设上限的成员不计入），超出返回 409。
 - 生效配额：项目管理员可在 `/api/project-users` 下发/编辑时设置 `dailyRequestLimit`、`monthlyRequestLimit`、`monthlyBudgetCny`（留空继承全局调用治理默认值）；列表与编辑响应均携带 `effectiveQuota`（含 user/global 来源标记），角色升降仍为管理员专属。
-- 批量上传用户：`POST /api/users/batch`（管理员）与 `POST /api/project-users/batch`（项目管理员，项目仅限自己所在项目），Excel 固定表头“用户名、手机号、日上限（次）、月上限（次）、月预算（元）”，初始密码统一为后端常量 `BATCH_DEFAULT_PASSWORD`（当前 12345678），账号固定 `role="user"`；用户名已存在或文件内重复的行跳过并在 `skipped` 中逐条说明，不阻断其余创建。手机号持久化在 `User.phone`（可空），下发（`/api/users`、`/api/project-users`）与编辑接口的 `phone` 字段同样支持填写与清空（传 null 清除）。
+- 批量上传用户：`POST /api/users/batch`（管理员）与 `POST /api/project-users/batch`（项目管理员，项目仅限自己所在项目），Excel 固定表头仅“用户名、手机号”，日上限/月上限/月预算作为弹窗内统一输入框对本批次所有账号生效（留空继承全局默认值），初始密码统一为后端常量 `BATCH_DEFAULT_PASSWORD`（当前 12345678），账号固定 `role="user"`；用户名已存在或文件内重复的行跳过并在 `skipped` 中逐条说明，不阻断其余创建。手机号持久化在 `User.phone`（可空），下发（`/api/users`、`/api/project-users`）与编辑接口的 `phone` 字段同样支持填写与清空（传 null 清除）。
 - 登录通过 HttpOnly session Cookie 工作。不要改为把令牌放入 localStorage，也不要在日志或响应中泄露 token、密码或上游 API key。
 - 题目和审核 API 由 `services.py` 的 `question_json`、`check_result_json` 等函数统一序列化；新增字段时避免在路由中重复拼装不一致的 JSON。
 - 模型调用、重试、并发和限流集中在 `services.py` 与 `config.py`。新增审核类型应经过队列、依赖激活、结果落库、完成状态和事件发送的完整链路。
