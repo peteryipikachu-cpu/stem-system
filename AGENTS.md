@@ -110,6 +110,7 @@ ruff check .
 - 审核执行采用 `src/lib/check-runs.ts`：创建任务后订阅 `/api/check-runs/{id}/events`，同时保留轮询/重取数据的容错路径。不要将长时审核阻塞在浏览器请求中。
 - 数学内容通过 `LatexRenderer` 呈现。修改公式处理时运行后端 LaTeX 测试，并注意不可信题干的渲染安全。
 - UI 保持 Ant Design 现有风格；避免无关的全局 CSS 改动和大范围重排。antd 的 Space 组件须使用 `orientation` 属性，`direction` 已弃用会触发控制台警告。
+- 同路由内的查询参数导航（顶部标签页 `/?view=...`、项目卡片 `/?projectId=...`、面包屑返回 `/`）统一用 `window.history.pushState`，Next.js 会同步 `useSearchParams`；不要用 `router.push`：纯 query 变更的 `router.push` 需要 RSC 往返并参与导航队列，服务端繁忙或存在未完成导航时会偶发点击无响应（跨路由跳转如 `/login`、`/questions/[id]` 仍用 `router.push/replace`）。
 
 ### API、鉴权与数据
 
@@ -158,6 +159,7 @@ ruff check .
 ## 项目知识沉淀
 
 - 自动沉淀机制：Agent 在每完成一个独立任务（如功能开发、排障、架构重构、Prompt 调优）后，须自动评估是否有具备长久复用价值的知识或约束，并在任务交付时自动写入落盘到本文件的相关章节中，无需用户重复提醒。
+- handover 交接文档同步：每完成一次功能修改，除代码提交外，还须同步更新受影响组件仓库的 `handover.md`（`stem-system-backend/app/handover.md`、`stem-system-frontend/app/handover.md`、`stem-system-worker/app/handover.md`），在对应章节（通常为“关键业务规则”）补充或修正行为变更说明，使交接文档与最新实现保持一致；修正过时描述时只改相关条目，不做无关重排。handover 改动随代码一并提交推送到对应 GitLab 仓库。
 - 每次在开发、排障、部署或模型联调中确认了可复用的事实、约束或操作方式，都应在本文件的相应章节补充简洁说明；避免记录密钥、Cookie、个人信息和临时日志。
 - 外部 AI 协同上下文沉淀：与 ChatGPT 等外部 AI 对话产生的架构决策、Prompt 调试或新规范，须显式导出为 Markdown 片段并追加沉淀到本文件中，确保各 AI Agent 可跨会话继承上下文记忆。
 - 新知识应说明适用组件、行为或限制，以及必要时的验证方式，方便后续维护者直接查阅；过期或被新实现替代的信息应同步更新。
