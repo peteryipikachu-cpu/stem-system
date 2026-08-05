@@ -115,6 +115,7 @@ ruff check .
 
 - 在 `main.py` 添加或调整接口时，使用 Pydantic schema 作为契约；明确状态码、错误语义和认证要求。
 - 受保护接口使用 `get_current_user`；仅管理员操作使用 `require_admin`。题目和审核任务查询必须维持所有者范围，管理员才可跨用户查看。
+- 项目管理员账号管理（`/api/project-users`）：项目管理员仅能查看、下发、编辑其所在项目内的普通用户；下发固定 `role="user"`，项目分配仅限请求者所在项目（越权 403）；编辑时保留请求者范围外的项目归属，非普通用户或不在其范围内的账号不可见（404）。角色升降与配额设置仍为管理员专属；管理员全量账号管理继续走 `/api/users`。项目逻辑删除：管理员可删任意项目，项目管理员仅可删自己创建的项目（`DELETE /api/projects/{id}`）。
 - 登录通过 HttpOnly session Cookie 工作。不要改为把令牌放入 localStorage，也不要在日志或响应中泄露 token、密码或上游 API key。
 - 题目和审核 API 由 `services.py` 的 `question_json`、`check_result_json` 等函数统一序列化；新增字段时避免在路由中重复拼装不一致的 JSON。
 - 模型调用、重试、并发和限流集中在 `services.py` 与 `config.py`。新增审核类型应经过队列、依赖激活、结果落库、完成状态和事件发送的完整链路。
