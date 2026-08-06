@@ -122,6 +122,8 @@ ruff check .
 - 生效配额：项目管理员可在 `/api/project-users` 下发/编辑时设置 `dailyRequestLimit`、`monthlyRequestLimit`、`monthlyBudgetCny`（留空继承全局调用治理默认值）；列表与编辑响应均携带 `effectiveQuota`（含 user/global 来源标记），角色升降仍为管理员专属。
 - 批量上传用户：`POST /api/users/batch`（管理员）与 `POST /api/project-users/batch`（项目管理员，项目仅限自己所在项目），Excel 固定表头仅“用户名、手机号”，日上限/月上限/月预算作为弹窗内统一输入框对本批次所有账号生效（留空继承全局默认值），初始密码统一为后端常量 `BATCH_DEFAULT_PASSWORD`（当前 12345678），账号固定 `role="user"`；用户名已存在或文件内重复的行跳过并在 `skipped` 中逐条说明，不阻断其余创建。手机号持久化在 `User.phone`（可空），下发（`/api/users`、`/api/project-users`）与编辑接口的 `phone` 字段同样支持填写与清空（传 null 清除）。
 - 登录通过 HttpOnly session Cookie 工作。不要改为把令牌放入 localStorage，也不要在日志或响应中泄露 token、密码或上游 API key。
+- 登录失败限流（安全测试 SEC-01 修复）：后端 `POST /api/auth/login` 对失败次数按账号（默认 5 次）与 IP（默认 20 次）双维度计数（Redis `stem:login_attempts:*`，窗口 `login_lock_minutes` 默认 15 分钟），达阈后任何登录（含正确密码）返回 429 + `Retry-After`，成功登录清零计数，Redis 不可用时降级放行；锁定文案不得区分维度（防账号枚举）。新增登录失败分支不得绕过计数。
+- `auth_secret` 部署红线（安全测试 SEC-04）：代码内置默认密钥仅限本地开发，不得用于任何对外环境；`environment=production` 时 `config.py` 已强制要求经环境变量注入 ≥ 32 位密钥否则启动失败。生产部署必须 `openssl rand -hex 32` 生成并覆盖 `AUTH_SECRET`，否则攻击者可用仓库中的默认密钥伪造任意账号（含管理员）会话令牌。不要把“移除默认值/启动即失败”改回宽松行为，除非产品明确要求。
 - 令牌版本号吊销机制（`User.token_version`，迁移 `20260806_22`）：解决无状态 HMAC 令牌签发后登出/改密无法失效的缺陷。签发 Token 时在 Payload 写入 `ver`（默认为用户 `token_version`）；在 `get_current_user` 校验时比对 `token_ver == user.token_version`。用户登出（`POST /api/auth/logout`）、管理员重置密码（`PUT /api/users/{user_id}/password`）或更新账号密码/激活状态/角色时，在 DB 中使 `token_version += 1` 并提交，使该账号所有已有 Token（包含泄露的旧令牌）立即全部失效，防止越权或旧会话复用。
 - 题目和审核 API 由 `services.py` 的 `question_json`、`check_result_json` 等函数统一序列化；新增字段时避免在路由中重复拼装不一致的 JSON。
 - 模型调用、重试、并发和限流集中在 `services.py` 与 `config.py`。新增审核类型应经过队列、依赖激活、结果落库、完成状态和事件发送的完整链路。
