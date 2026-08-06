@@ -124,7 +124,7 @@ ruff check .
 - 登录通过 HttpOnly session Cookie 工作。不要改为把令牌放入 localStorage，也不要在日志或响应中泄露 token、密码或上游 API key。
 - 题目和审核 API 由 `services.py` 的 `question_json`、`check_result_json` 等函数统一序列化；新增字段时避免在路由中重复拼装不一致的 JSON。
 - 模型调用、重试、并发和限流集中在 `services.py` 与 `config.py`。新增审核类型应经过队列、依赖激活、结果落库、完成状态和事件发送的完整链路。
-- 相似题检测是上传/保存新版本后的异步任务（不拦截上传，上传去重仅为精确文本匹配，仅空白差异的同题靠相似题检测兜底）：召回依赖 `question_ngrams` n-gram 索引，功能上线前入库的历史题目曾无索引导致召回为空直接判 `clear` 的盲区（题目 127 与题目 8 同题未发现）；用 `stem-system-backend/app/scripts/backfill_question_ngrams.py` 幂等补齐索引，`--rescan <题目id>` 可清理旧 similarity 任务（idempotency_key 冲突，关联记录级联删除）后重新召回判定；重扫时 `CheckRun.requested_by_user_id` 须传真实用户或 None，外键不接受不存在的 id。
+- 相似题检测分两层：上传时同步拦截 + 上传后异步模型判定。上传拦截（`POST /api/questions` 的 `filter_similar_uploads`）只做本地 n-gram 词汇召回，阈值 `SIMILARITY_UPLOAD_BLOCK_THRESHOLD=0.5`（高于异步召回线 0.18，仅拦近乎相同者，同批次已接受项也在内存互查），被拦条目不导入并随响应 `skippedSimilar` 返回（`skipped` 仍仅统计精确重复；上传去重是精确文本匹配，仅空白差异的同题靠拦截/相似题检测兜底）；改写幅度较大的同题不拦，由上传后异步模型判定标记。召回依赖 `question_ngrams` n-gram 索引，功能上线前入库的历史题目曾无索引导致召回为空直接判 `clear` 的盲区（题目 127 与题目 8 同题未发现）；用 `stem-system-backend/app/scripts/backfill_question_ngrams.py` 幂等补齐索引，`--rescan <题目id>` 可清理旧 similarity 任务（idempotency_key 冲突，关联记录级联删除）后重新召回判定；重扫时 `CheckRun.requested_by_user_id` 须传真实用户或 None，外键不接受不存在的 id。
 
 ### 队列与 SSE
 
