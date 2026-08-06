@@ -198,7 +198,7 @@ ruff check .
 ### 模型思考参数
 
 - 唯一实现来源：`stem-system-worker/app/app/services.py`；模型目录以三端各自的 `audit_models.py` 为准。
-- L0 包含本地 Markdown/LaTeX 校验（不调用模型）与 AI 合成题检测（固定使用 `deepseek-v4-flash`，由三端 `audit_models.py` 的 `SYNTHESIS_AUDIT_MODEL_ID` 与后端 `DEFAULT_GLOBAL_AUDIT_MODEL_IDS["synthesis"]` 共同决定，修改时须三处同步）；两者均为 `difficulty_assessment` 的 L0 工作项。
+- L0 包含本地 Markdown/LaTeX 校验（不调用模型）与 AI 合成题检测（固定使用 `deepseek-v4-flash`，由三端 `audit_models.py` 的 `SYNTHESIS_AUDIT_MODEL_ID` 与后端 `DEFAULT_GLOBAL_AUDIT_MODEL_IDS["synthesis"]` 共同决定，修改时须三处同步）；两者均为 `difficulty_assessment` 的 L0 工作项。合成题检测 Prompt 兼任“是否构成正常题目”判定：孤立数字/片段等非题目内容输出 `is_valid_question=false`，L0 门控据此将评测定为 `invalid_question` 阻断定级（前端展示“非正常题目”）；旧检测结果无该字段按有效兼容，检测调用失败不阻塞分级。
 - 所有模型均通过 OpenAI-compatible APIRoute 网关请求；逻辑 Provider 仅用于区分参数和限流策略。
 - 解题 `max_tokens` 不再硬编码：Worker 派发每个工作项时实时读取治理配置 `solveMaxTokens`，留空则不传；管理员在“模型管理”页修改保存后对新派发的工作项即时生效，无需重启或改代码。
 
