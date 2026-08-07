@@ -117,6 +117,7 @@ ruff check .
 
 - 在 `main.py` 添加或调整接口时，使用 Pydantic schema 作为契约；明确状态码、错误语义和认证要求。
 - 受保护接口使用 `get_current_user`；仅管理员操作使用 `require_admin`。题目和审核任务查询必须维持所有者范围，管理员才可跨用户查看。
+- 全局功能开关统一存放 `system_settings` 的 `feature_flags` 键（缺省视为开启），管理员经 `GET/PUT /api/admin/feature-flags` 读写，改后即时生效无需重新部署。相似度检测总开关（`similarityDetection`）关闭后：上传/保存新版本不再触发异步相似题检测（直接标 clear）、质检不受相似校验状态锁定、巡检卡死修复直接解锁；上传同步 n-gram 拦截（纯本地去重）不受开关影响。
 - 项目管理员账号管理（`/api/project-users`）：项目管理员仅能查看、下发、编辑其所在项目内的普通用户；下发固定 `role="user"`，项目分配仅限请求者所在项目（越权 403）；编辑时保留请求者范围外的项目归属，非普通用户或不在其范围内的账号不可见（404）。角色升降仍为管理员专属；管理员全量账号管理继续走 `/api/users`。项目逻辑删除：管理员可删任意项目，项目管理员可删自己所在的项目（`DELETE /api/projects/{id}`，后端按 `project_scope` 校验）。用量分析（`GET /api/admin/project-costs`）：管理员可见全部项目与全部用户的调用成本汇总；项目管理员同样可访问，但按 `project_scope` 仅返回其所属项目的汇总，用户汇总也仅统计这些项目范围内的请求（无相关请求的用户不展示）；普通用户仍返回 403。前端“我的项目”页的“调用成本”按钮与项目卡片累计成本对 admin 和 project_admin 均展示。
 - 个人题目上传上限：`User.question_upload_limit`（null=不限制），可在 `/api/users` 与 `/api/project-users` 的下发/编辑接口设置；`POST /api/questions` 按提交者名下题目总数门控，达上限或单次提交超出剩余配额时返回 409 并提示剩余可上传数量。账号列表接口附带 `questionCount`（已上传数）供前端展示消耗。设置上限时（`/api/users` 与 `/api/project-users` 的下发/编辑）会校验项目全部成员上限总和不超过项目题目目标（仅目标 > 0 的项目，未设上限的成员不计入），超出返回 409。
 - 生效配额：项目管理员可在 `/api/project-users` 下发/编辑时设置 `dailyRequestLimit`、`monthlyRequestLimit`、`monthlyBudgetCny`（留空继承全局调用治理默认值）；列表与编辑响应均携带 `effectiveQuota`（含 user/global 来源标记），角色升降仍为管理员专属。
