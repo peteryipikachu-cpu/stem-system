@@ -149,6 +149,13 @@ ruff check .
 - 暂停期间 Worker 激活路径全部冻结：任何“置 queued + 入队”路径（下游激活、下一层入队、可重试退避重入队、租约过期回收、派发前探测）必须检查 run.status，暂停时经 `schedule_or_hold` 把工作项置 `paused` 且不入队；`recover_ready_dependencies` 与 stuck 恢复跳过 paused 任务；`complete_run_if_ready` 对 paused 短路返回、未完成集合包含 paused，`reconcile_orphaned_runs` 活跃工作集合包含 paused，防止暂停任务被误收尾。新增任何工作项入队路径时必须同步补上暂停门控。
 - 台账行必须落到终态：Worker 关闭（CancelledError 路径）就地经 `mark_ledger_interrupted` 把被中断调用的台账结算为 `failed/error_code=execution_interrupted`（记输入估算、打估算标记）；进程被硬杀留下的孤儿行由 `settle_orphaned_ledgers` 在每轮恢复循环（含启动首轮）回收——条件为台账 running 且对应工作项不再 running。排查“台账出现多条同 attempt 记录”时，一条中断 + 一条重跑是重启的预期形态。
 
+### 健康巡检
+
+- 入口：管理员顶部导航“健康巡检”（`/?view=health`，仅全局 admin），前端 `HealthPage` 30 秒 SWR 轮询 `GET /api/admin/health`；人工修复走 `POST /api/admin/health/repair`（body `{category, id}`，id 语义随类别变化：题目 ID 或工作项 ID）。
+- 异常为实时扫描不建表：后端 `scan_health` 每次请求现查 DB+Redis，返回异常清单（含 severity/summary/detail）与三项应为 0 的指标（未定稿任务、未结算台账、Worker 心跳）。
+- 自动/人工处置边界：`similarity_stuck`（checking 但无活跃 similarity 工作项）Worker 每轮巡检自动写回 `failed`，人工“重新校验”经 `create_similarity_run` 重跑；`lost_queue_item`（queued 到期但不在 Redis 公平队列）由既有 `recover_queued_work` 全量幂等补投自动修复，无需重复实现；`redis_orphan_entry`（队列成员在 DB 已终态/不存在）Worker `cleanup_orphaned_queue_entries` 自动 ZREM；`stalled_blocked`/`long_queued`（超 30 分钟）仅报告不自动修复，避免误伤 quota 等待（long_queued 扫描排除 `error_code='quota_exceeded'`）与依赖编排。
+- 人工修复分发器（后端 `repair_health_anomaly`）必须带状态守卫：similarity 仅接受 checking/failed 题；重入队仅接受 queued；stalled_blocked 重置前须确认同 run+check_type 无未完成作答工作项（依赖未满足拒绝，防误触发模型调用）；相似度重跑传 `requested_by_user_id=None`（管理员修复不占用户配额）。新增巡检/修复路径必须幂等，可重复执行不产生副作用。
+
 ### 数据库迁移
 
 - 变更 `models.py` 中的持久化结构时，创建新的 Alembic revision，禁止修改已提交的迁移文件。
