@@ -161,6 +161,7 @@ ruff check .
 - 变更 `models.py` 中的持久化结构时，创建新的 Alembic revision，禁止修改已提交的迁移文件。
 - 迁移应能从空库顺序执行，并同时考虑 API 与 Worker 可能并发运行的兼容性。
 - 使用 `alembic upgrade head` 验证迁移；不要执行会删除真实数据的操作，除非用户明确授权。
+- 上线流水线没有人工执行 SQL 的环节：**配置数据类**的一次性修复（如网关模型 ID 改名同步 `system_settings`）不建 Alembic revision，而是放在后端启动初始化阶段幂等执行（参考 `migrate_legacy_gateway_model_ids`），无旧数据时不写库；历史任务快照保留旧值属设计预期。
 
 ## 验证与交付
 
