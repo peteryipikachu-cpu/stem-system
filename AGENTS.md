@@ -219,7 +219,7 @@ ruff check .
 | --- | --- | --- | --- | --- |
 | doubao-2.0-pro、doubao-2.1-pro | `thinking.type=enabled`；`reasoning.effort=high` | `thinking.type=disabled` | `thinking.type=enabled`；`reasoning.effort=medium` | 三种场景均流式 |
 | gemini-3.1-pro | `thinking.type=enabled`；`reasoning.effort=high` | `thinking.type=disabled` | `thinking.type=enabled`；`reasoning.effort=medium` | 当前均非流式 |
-| kimi/kimi-k3 | `enable_thinking=true`；`reasoning_effort=max` | `enable_thinking=true`；`reasoning_effort=low` | `enable_thinking=true`；`reasoning_effort=high` | 非流式（上游 APIRoute 网关流式接口返回空 SSE 字节流且 0 Token，须保持非流式保证正常输出） |
+| kimi/kimi-k3 | `enable_thinking=true`；`reasoning_effort=max` | `enable_thinking=true`；`reasoning_effort=low` | `enable_thinking=true`；`reasoning_effort=high` | 仅解题流式 |
 | qwen3.7-plus | `enable_thinking=true`；`reasoning_effort=xhigh`；`temperature=0.7`；`max_tokens` 取自治理配置 `solveMaxTokens`（默认 131072，官方 128K 输出上限） | `enable_thinking=false`；`temperature=0.1` | `enable_thinking=true`；`reasoning_effort=medium` | 仅解题流式 |
 | qwen3.7-max、qwen3.8-max | `enable_thinking=true`；`reasoning_effort=xhigh`；`temperature=0.7` | `enable_thinking=false`；`temperature=0.1` | `enable_thinking=true`；`reasoning_effort=medium` | 仅解题流式 |
 | deepseek-v4-flash、deepseek-v4-pro | `thinking.type=enabled`；`reasoning_effort=max`；`temperature=0.7`；`max_tokens` 取自治理配置 `solveMaxTokens`（默认 393216，官方 384K 输出上限） | `thinking.type=disabled`；`temperature=0.1` | `thinking.type=enabled`；`reasoning_effort=high` | 仅解题流式 |
