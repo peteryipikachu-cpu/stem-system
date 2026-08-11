@@ -11,19 +11,18 @@
 
 ## 目录与职责
 
+活代码位于三个独立仓库（启动方式见“本地开发”）；根仓库 `backend/` 是历史单体快照，`src/`、`deploy/` 已不存在，均非活代码：
+
 | 路径 | 职责 |
 | --- | --- |
-| `src/app/` | App Router 页面、布局及全局样式。 |
-| `src/components/` | 可复用的前端交互组件，例如导入、账号管理和公式渲染。 |
-| `src/lib/check-runs.ts` | 审核任务创建、查询与 SSE 订阅客户端。 |
-| `src/types/index.ts` | 前端共享类型。修改接口字段时同步更新。 |
-| `backend/app/main.py` | FastAPI 生命周期、路由、鉴权入口和 SSE API。 |
-| `backend/app/models.py` | SQLAlchemy 数据模型。 |
-| `backend/app/schemas.py` | API 请求/响应 Pydantic schema。 |
-| `backend/app/services.py` | 审核编排、队列、模型调用与结果序列化。 |
-| `backend/app/worker.py` | Redis 队列消费循环。 |
-| `backend/alembic/versions/` | 仅追加的数据库迁移。 |
-| `deploy/nginx/stem-audit.conf` | 生产反向代理与 SSE 配置。 |
+| `stem-system-frontend/app/src/app/` | App Router 页面、布局及全局样式。 |
+| `stem-system-frontend/app/src/components/` | 可复用的前端交互组件，例如导入、账号管理和公式渲染。 |
+| `stem-system-frontend/app/src/lib/check-runs.ts` | 审核任务创建、查询与 SSE 订阅客户端。 |
+| `stem-system-frontend/app/src/types/index.ts` | 前端共享类型。修改接口字段时同步更新。 |
+| `stem-system-backend/app/app/main.py` | FastAPI 生命周期、路由、鉴权入口和 SSE API。 |
+| `stem-system-backend/app/app/models.py` / `schemas.py` / `services.py` | SQLAlchemy 数据模型、Pydantic 契约、审核编排与序列化。 |
+| `stem-system-backend/app/alembic/versions/` | 仅追加的数据库迁移。 |
+| `stem-system-worker/app/app/worker.py` / `services.py` | Redis 队列消费循环、模型调用、重试与熔断。 |
 
 ## 先读再改
 
@@ -171,9 +170,8 @@ ruff check .
 
 | 改动 | 至少执行 |
 | --- | --- |
-| 前端 TypeScript/样式/组件 | `npm run lint`；涉及构建、路由或配置时再执行 `npm run build`。 |
-| 审核 API 客户端或性能脚本 | `npm run benchmark`（需要可用后端时）。 |
-| 后端业务、模型调用或 LaTeX | 在 `backend/` 执行 `pytest` 和 `ruff check .`。 |
+| 前端 TypeScript/样式/组件 | `npm run lint`；涉及构建、路由或配置时再执行 `npm run build`（cwd `stem-system-frontend/app`）。 |
+| 后端业务、模型调用或 LaTeX | 在 `stem-system-backend/app` 或 `stem-system-worker/app` 执行 `pytest` 和 `ruff check .`。 |
 | 路由、鉴权或响应契约 | 运行相关测试，并用已认证与未认证场景验证状态码和权限边界。 |
 | 数据模型或迁移 | `alembic upgrade head`，再运行相关后端测试。 |
 | SSE、队列或 Worker | 使用 API 创建任务，确认 Worker 消费、事件送达、结果持久化与最终状态。 |
@@ -190,7 +188,7 @@ ruff check .
 - 已验证的网关并发规则：`APIROUTE_API_KEYS` 可按逗号拆分，但若最终复用同一上游额度，不能提高实际吞吐。所有 APIRoute 模型共享一套全局额度，再叠加厂商额度；额度、价格和公平份额统一由数据库中的 `model_governance` 配置管理，不再使用环境变量 `AI_LIMIT_*`。
 - 难度分级评测：新题导入或保存新版本后会创建独立的 `difficulty_assessment` 队列任务，按 L0（本地 Markdown/LaTeX 规则校验 + AI 合成题检测，两者均到达终态后才晋级）→L1（过易筛选）→L2（难度复核）→L3（终极定级）运行。各层判定统一为“答对门槛”（Worker `assessment_condition` 比较答对次数、`assessment_stop_level` 决定定级）：满足 = 答对次数在门槛之内，题目配得上该层难度，晋级下一层，末层满足即定级 L3；不满足 = 题目过易，降一级定级（L1→L0、L2→L1、L3→L2）。旧“过易线”（命中=降级、未命中=晋级）与更旧“L2/L3 命中=定级入库”语义均已废弃，不得重新引入。策略在创建时写入 `CheckRun.model_versions` 快照，运行中不得读取或改用新的全局策略。分层策略的答对门槛阈值不得大于该层模型运行总次数（后端 `normalize_difficulty_policy` 强制校验，前端同步提示并禁止保存）。答对门槛操作符支持 `>=`、`>`、`=`、`<=`、`<` 五种，统一以“答对次数”为口径比较阈值（Worker `assessment_condition`）；旧“不等价次数”口径已于 2026-08 完成等价换算迁移（全局策略与在途快照），不得重新引入。整层判败（`fail_difficulty_assessment`）时必须把该层层汇总同步置 `status="failed"` 并带失败原因，前端据此显示红色“评测失败/已中止”，不得把已判败的层留在“作答中/待比对”展示。
 - 分级评测空答案作答：完成但无结果（如输出超限被截断）的作答按答错计、正常进入比对，不得因此整层判败；比对 payload 只含有结果的作答（按 attempt 排序），且必须经 `equivalence_solve_query` 按层级过滤（分级比对只取本层作答，带入其他层作答会因标志数不一致判“比对未返回完整判定”整任务判败），定稿时空答案位补 False。整层作答全部无有效结果时比对项照常入队，Worker 执行段检测到 payload answers 为空即短路跳过上游调用（不写台账，遵守“一行台账 = 一次真实上游请求”），以 `{"equivalences": [], "skipped": "no_valid_answers"}` 完成，0 答对原样代入该层 K 判定：满足门槛晋级、不满足降一级定级，layer_summary 带 `allAnswersEmpty: true` 供前端区分展示。历史遗留的卡“待比对”任务用 Worker `scripts/repair_stuck_equivalence.py` 修复；全空被整层判败的历史任务用 `scripts/repair_all_empty_layer.py` 修复（含把存量快照的旧 `>=` operator 同步为当前全局策略）。复位工作项时必须同时清空 `completed_at`，否则完成事务的终态校验会把 completed_at 非空的 running 工作项当作迟到重复完成而丢弃新结果，永远卡 running。
-- L0 双检测门控：后端创建评测时同时生成 `assessment_format`（规则）与 `assessment_synthesis`（固定 `deepseek-v4-flash`）两个 L0 工作项；Worker 的 `finalize_assessment_l0` 在两者均到达终态后才创建首个作答层。所有 LaTeX 格式错误（包含 warning 级提示与确定性 error 级，均通过 `blocking_format_errors` 阻断）均将评测终定为 `format_failed`，不再展示“仅提醒，不阻断分级”；错误条目统一携带 `ruleId`/`severity`/`line`（行号由字符偏移换算，`difficulty_markdown_check` 另附 `field`），同类命中按 findall 全量报告并去重；AI 合成题检测失败（含重试耗尽）不阻塞分级，在 detail 的 L0 层记录 `synthesis.result="error"` 后继续晋级。前端不再有“全量质检”入口，也不再展示独立的 LaTeX/合成题质检卡片，题目详情页质检结果区只保留难度分级评测卡片（L0 层内含两项检测结果），按钮为“开始 L0 检测”；版本质检汇总（checkSummary）以分级评测结果为准，历史独立的 latex/synthesis 结果仍兼容纳入汇总判定。合格判定同口径：前端 `isQualified`、后端 `services.question_is_qualified`（列表 `qualified` 筛选）与学科分布 `qualifiedCount` 均把当前版本 `difficulty_assessment` 结果 pass 视为 LaTeX+合成题基础检测通过（历史独立双 pass 兼容），不得要求同一 run 同时存在独立 latex/synthesis 记录（新体系下永远匹配不到，会全部误判“未检测”）。
+- L0 双检测门控：后端创建评测时同时生成 `assessment_format`（规则）与 `assessment_synthesis`（synthesis 模型取项目级配置优先、未配置时兜底 `deepseek-v4-flash`）两个 L0 工作项；Worker 的 `finalize_assessment_l0` 在两者均到达终态后才创建首个作答层。所有 LaTeX 格式错误（包含 warning 级提示与确定性 error 级，均通过 `blocking_format_errors` 阻断）均将评测终定为 `format_failed`，不再展示“仅提醒，不阻断分级”；错误条目统一携带 `ruleId`/`severity`/`line`（行号由字符偏移换算，`difficulty_markdown_check` 另附 `field`），同类命中按 findall 全量报告并去重；AI 合成题检测失败（含重试耗尽）不阻塞分级，在 detail 的 L0 层记录 `synthesis.result="error"` 后继续晋级。前端不再有“全量质检”入口，也不再展示独立的 LaTeX/合成题质检卡片，题目详情页质检结果区只保留难度分级评测卡片（L0 层内含两项检测结果），按钮为“开始 L0 检测”；版本质检汇总（checkSummary）以分级评测结果为准，历史独立的 latex/synthesis 结果仍兼容纳入汇总判定。合格判定同口径：前端 `isQualified`、后端 `services.question_is_qualified`（列表 `qualified` 筛选）与学科分布 `qualifiedCount` 均把当前版本 `difficulty_assessment` 结果 pass 视为 LaTeX+合成题基础检测通过（历史独立双 pass 兼容），不得要求同一 run 同时存在独立 latex/synthesis 记录（新体系下永远匹配不到，会全部误判“未检测”）。
 - LaTeX 格式校验为 Worker 纯规则引擎（`latex_check`，不调模型），以《LaTeX 数学公式编写与校验规范》六条强制红线为基准（环境不闭合、命令拼写错误、参数缺失、非法字符、嵌套违规必须拦截；推荐风格项不报错）：分隔符配对（忽略 `\$` 与 `\left[\right]`）、begin/end 栈式配对（拦截未闭合、孤立 `\end` 与同层环境交叉嵌套）、公式内变量与数字直接相邻（如 `x1` 应写 `x_1`；字母前有其他字母也检测，如 `dx2` 实为 `dx^2` 丢上标；数字在字母前的系数写法如 `3x2` 不误报）、公式内中文/全角字符（`\text{}` 豁免）、未知或拼写错误命令（amsmath+amssymb 白名单 `_COMMON_LATEX_COMMANDS` 为基准，error 级阻断，新增合法命令时须同步扩充）、`\frac` 系命令花括号感知参数校验（`\frac{3}` 缺分母拦截；`\sqrt[n]{x}` 可选根指数合法）、花括号不成对、`\left/\right` 不配对（用带词边界正则 `\\left\b`/`\\right\b` 计数，避免 `\rightarrow`/`\leftarrow` 中的 right/left 子串误计）、正文裸写 LaTeX 数学命令（如 `\boxed`/`\dfrac`/`\sqrt` 等未用 `$` 包裹，触发 `latex-unwrapped-math-command` 阻断错误）、相邻双花括号组 `{3}{4}` 疑似丢失 `\frac`（`latex-missing-frac`）、跨字段丢下标提示（`latex-subscript-letter`，本文存在规范写法 `j_i` 时裸写 `ji` 才提示）、公式内裸单词检测（`latex-bare-math-word`，如 `sigmaa` 实为 `\sigma` 丢反斜杠、`sina` 实为 `\sin a`，error 级阻断）：匹配字典为模块级常量 `_BARE_GREEK_WORDS` + `_BARE_MATH_FUNCTION_WORDS`（全等或前缀匹配，长度降序优先最长词），合法裸写词经 `_BARE_WORD_EXCEPTIONS` 豁免（当前仅 sinc），新增例外须同步扩充；正文未转义 `%`/`&`/`~`（正文为 Markdown，`#` 是合法标题语法不拦截；公式内半角 `~` 与全角波浪号 `～` 均合法，带圈数字 ①-⑳ 合法）；修改规则后须用存量题库回归，避免误伤规范写法。
 - 分级版本隔离：`CheckRun.question_version` 与工作项 payload 的 `questionVersion` 固化题目版本；旧版本尚未完成的评测只能写入该历史版本的结果，不能覆盖当前题目的 `difficulty_level`、`difficulty_status` 或当前分级引用。
 - 重新分级/重新检测增量复用：创建新任务或触发重试时只把失败、超时或未完成的作答工作项重新入队；历史已完成且 result 非空的作答与 L0 检测工作项直接继承（置 `completed`、拷贝结果与耗时、payload 标记 `inheritedFrom`），跳过 Redis 入队以节省上游配额；例外：`assessment_format` 失败（含错误条目）的历史结果不继承——L0 规则校验结果随规则版本变化且重跑零成本，必须用当前规则重新检测。复用源从最近一次历史 `CheckRun` 向前追溯（限同题同版本、最多回看 5 次），跨 run 累计、同键取最新 run 的结果；空答案作答（输出截断）同样继承，按“空答案=答错”口径计入判定。匹配键为（层级, 模型, 该模型在本层的第几次作答）：payload 有 `modelAttempt` 直接用，旧数据回退为同层同模型内按 attempt 升序的序号，策略里模型增减/顺序变化后仍能对齐；序号必须在包含失败/取消项的全量集合内计算，`fetch_reusable_solves` 返回已带序号的元组，调用方不得重新编号，否则与展开侧 attempt/modelAttempt 错位失配。若所有作答均被继承，比对任务（`equivalence`/`assessment_equivalence`）由后端或 Worker 直接唤醒，不得遗留永久阻塞。
