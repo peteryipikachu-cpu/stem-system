@@ -150,6 +150,7 @@ ruff check .
 - 任务暂停/恢复统一走后端 `pause_check_run_core`/`resume_check_run_core`（队列监控 `POST /api/admin/queue/check-runs/{id}/pause`、`/resume`，权限与取消一致）：暂停时 run 置 `paused`，queued/blocked 工作项置 `paused`（清租约、不写 completed_at）；running 工作项不中断，跑完结果照常落库保留（上游调用本就无法中断），题目保持 `checking`；恢复时 paused 工作项回 `queued` 并按原 `available_at` 重新入队，仅 paused 可恢复（否则 409），暂停对 paused/completed/cancelled 幂等。暂停期间禁止对同题新建质检/改版本（后端活跃任务判定与冲突检测集合均包含 paused），暂停中的任务被取消时题目照常复位；Redis 公平队列中残留的已暂停条目同样无需清理，由派发门控的 `status != "queued"` 丢弃。
 - 暂停期间 Worker 激活路径全部冻结：任何“置 queued + 入队”路径（下游激活、下一层入队、可重试退避重入队、租约过期回收、派发前探测）必须检查 run.status，暂停时经 `schedule_or_hold` 把工作项置 `paused` 且不入队；`recover_ready_dependencies` 与 stuck 恢复跳过 paused 任务；`complete_run_if_ready` 对 paused 短路返回、未完成集合包含 paused，`reconcile_orphaned_runs` 活跃工作集合包含 paused，防止暂停任务被误收尾。新增任何工作项入队路径时必须同步补上暂停门控。
 - 台账行必须落到终态：Worker 关闭（CancelledError 路径）就地经 `mark_ledger_interrupted` 把被中断调用的台账结算为 `failed/error_code=execution_interrupted`（记输入估算、打估算标记）；进程被硬杀留下的孤儿行由 `settle_orphaned_ledgers` 在每轮恢复循环（含启动首轮）回收——条件为台账 running 且对应工作项不再 running。排查“台账出现多条同 attempt 记录”时，一条中断 + 一条重跑是重启的预期形态。
+- 容量实况数据闭环（治理调参依据）：Worker `call_chat` 成功/失败两路径捕获上游 `X-RateLimit-*`/`Retry-After` 响应头落台账 `raw_usage.rateLimitHeaders`（kimi 官方返回这些头，可实证 APIRoute 账户真实档位；429 现场头信息尤为关键）；后端 `GET /api/admin/queue/capacity-stats?hours=1..168`（仅 admin，SQL 在 `main.CAPACITY_STATS_SQL`）现查台账聚合各厂商与全局的峰值并发（事件流窗口函数）、峰值 RPM/TPM（分钟桶）、429 次数、耗时 p95 并附 governance 上限对照；队列监控页“容量实况”卡片 60 秒轮询展示。调参守则：峰值并发贴近配置上限且零 429 → 可加压；出现 429 → 降对应厂商；RPM/TPM 峰值远低于上限说明该指标非瓶颈。
 
 ### 健康巡检
 
