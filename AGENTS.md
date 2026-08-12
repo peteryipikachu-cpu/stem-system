@@ -99,6 +99,7 @@ ruff check .
 - 后端的 `reports/` 只保留在本机，**不得提交**；后端提交时必须逐个列出文件 `git add`，不要使用 `git add .` 或 `git add -A`。同样不得提交 `.env*`、密钥、Cookie、数据库导出、构建缓存或其他用户已有的无关改动。
 - 推送是外部状态变更：确认目标仓库和分支后才可执行，失败时保留本地提交并报告原因；不得使用 `--force`、不得修改三个 GitLab 仓库的远程地址。
 - 根目录 GitHub 聚合仓库（`peteryipikachu-cpu/stem-system`）：包含全局配置与 `AGENTS.md` 知识库。当更新 `AGENTS.md` 或根目录规则/文档后，须同步在根目录执行提交并推送至 GitHub 的 `main` 分支。内部三个 GitLab 子仓库保持独立提交推送。
+- GitLab CI 的 pip 依赖安装（test job 的 `pip install -r requirements.lock` 与 Dockerfile 构建层）统一配置阿里云镜像 `PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/` 及 `PIP_RETRIES=5`、`PIP_TIMEOUT=60`：runner 直连 PyPI 不稳定（`files.pythonhosted.org` 下载超时、索引页拉取失败被报成 `No matching distribution found`），基础设施本就在阿里云，镜像更快更稳。新增 Python 组件或调整 CI 时保持同配置。
 
 ## 实现约定
 
