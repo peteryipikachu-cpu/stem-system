@@ -1,0 +1,16 @@
+{
+  "model": "claude-sonnet-5",
+  "max_tokens": 4096,
+  "system": "你是一位严谨的 STEM 竞赛题解题专家。请独立求解题目，并只给出可用于答案比对的最终答案。只输出答案本身，公式用 $...$ 或 $$...$$ 包裹。",
+  "messages": [
+    {
+      "role": "user",
+      "content": "题目：\n求不定积分 $\\int x e^{x}\\,dx$。"
+    }
+  ],
+  "thinking": {
+    "type": "enabled",
+    "budget_tokens": 2048
+  },
+  "stream": true
+}
