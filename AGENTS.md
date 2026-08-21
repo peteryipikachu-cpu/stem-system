@@ -46,12 +46,12 @@ This version has breaking changes — APIs, conventions, and file structure may 
 | 组件 | 目录 | 启动命令 |
 | --- | --- | --- |
 | 前端 | `stem-system-frontend/app` | `npm run dev -- --hostname 127.0.0.1 --port 3000` |
-| 后端 API | `stem-system-backend/app` | `env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem_audit' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000` |
-| Worker | `stem-system-worker/app` | `env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem_audit' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/python -m app.worker` |
+| 后端 API | `stem-system-backend/app` | `env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000` |
+| Worker | `stem-system-worker/app` | `env DATABASE_URL='postgresql+asyncpg://pikachu@localhost:5432/stem' REDIS_URL='redis://localhost:6379/0' /opt/anaconda3/bin/python -m app.worker` |
 
 - 本项目日常本机调试**不使用 Docker**，前端固定使用 `3000` 端口；如端口已被占用，应先确认并停止原有进程，不要改为 `3001`。
 - 启动顺序为：后端 API、Worker、前端；三项分别在独立终端运行。前端访问地址为 `http://127.0.0.1:3000`，后端文档为 `http://127.0.0.1:8000/docs`。
-- 后端和 Worker 使用 Conda 的 `/opt/anaconda3/bin/python` 及本机 PostgreSQL 数据库 `stem_audit`、本机 Redis。后端与 Worker 的 `DATABASE_URL` 必须指向同一个库（曾发生 Worker 照旧命令连到空库 `stem`、任务全部排队不动的故障）；排障"任务一直排队"时先核对两端进程环境变量中的库名是否一致。API Key 仅从各组件本地忽略的环境变量文件读取，禁止写入命令、代码、日志或提交。
+- 后端和 Worker 使用 Conda 的 `/opt/anaconda3/bin/python` 及本机 PostgreSQL 数据库 `stem`、本机 Redis。后端与 Worker 的 `DATABASE_URL` 必须指向同一个库 `stem`；排障"任务一直排队"时先核对两端进程环境变量中的库名是否一致。API Key 仅从各组件本地忽略的环境变量文件读取，禁止写入命令、代码、日志或提交。
 - 每次启动或重启前，先确认 `3000`、`8000` 端口和 Redis/PostgreSQL 的实际状态；停止服务时在对应终端使用 `Ctrl+C`，不要误杀无关进程。
 
 ### 依赖与服务
